@@ -3,6 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define GEM_FORGE
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
+
 //#define NUM_THREAD 4
 #define OPEN
 
@@ -103,6 +109,8 @@ void BFSGraph(int argc, char **argv) {
   int k = 0;
 #ifdef OPEN
   double start_time = omp_get_wtime();
+  omp_set_dynamic(0);
+  omp_set_num_threads(num_omp_threads);
 #ifdef OMP_OFFLOAD
 #pragma omp target data map(                                                   \
     to                                                                         \
@@ -113,14 +121,18 @@ void BFSGraph(int argc, char **argv) {
   {
 #endif
 #endif
+
+// ROI Begins.
+#ifdef GEM_FORGE
+    m5_detail_sim_start();
+#endif
+
     bool stop;
     do {
       // if no thread changes this value then the loop stops
       stop = false;
 
 #ifdef OPEN
-      omp_set_dynamic(0);
-      omp_set_num_threads(num_omp_threads);
 #ifdef OMP_OFFLOAD
 #pragma omp target
 #endif
@@ -158,6 +170,13 @@ void BFSGraph(int argc, char **argv) {
       }
       k++;
     } while (stop);
+
+// ROI ends.
+#ifdef GEM_FORGE
+    m5_detail_sim_end();
+    return;
+#endif
+
 #ifdef OPEN
     double end_time = omp_get_wtime();
     printf("Compute time: %lf\n", (end_time - start_time));
