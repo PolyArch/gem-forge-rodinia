@@ -1,7 +1,7 @@
 # C compiler
 CC = g++
 ICC = icc
-CC_FLAGS = -g -fopenmp -O2
+CC_FLAGS = -g -fopenmp -O3 
 
 all: bfs bfs_offload
 
