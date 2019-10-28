@@ -1,6 +1,6 @@
 # C compiler
 CC=clang
-CC_FLAGS=-gline-tables-only -fopenmp -O3 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops -I/home/zhengrong/Documents/llvm-trace-cpu/include
+CC_FLAGS=-gline-tables-only -fopenmp -O3 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops -I/home/zhengrong/Documents/llvm-trace-cpu/include -DGEM_FORGE
 
 RISCV_INSTALL=/home/zhengrong/Documents/riscv/install
 RISCV_SYSROOT=${RISCV_INSTALL}/sysroot

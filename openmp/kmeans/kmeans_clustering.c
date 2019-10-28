@@ -60,8 +60,8 @@
  * **/
 /**					only regular k-means clustering.
  * **/
-/**					Simplified for main functionality: regular
- * k-means	**/
+/**					Simplified for main functionality:
+ * regular k-means	**/
 /**					clustering.
  * **/
 /**                                                                     **/
@@ -73,6 +73,10 @@
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
 
 #define RANDOM_MAX 2147483647
 
@@ -174,9 +178,15 @@ float **kmeans_clustering(float **feature, /* in: [npoints][nfeatures] */
       partial_new_centers[i][j] = (float *)calloc(nfeatures, sizeof(float));
   }
   printf("num of threads = %d\n", num_omp_threads);
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
+
+  omp_set_num_threads(num_omp_threads);
+  omp_set_dynamic(0);
   do {
     delta = 0.0;
-    omp_set_num_threads(num_omp_threads);
 #pragma omp parallel shared(feature, clusters, membership,                     \
                             partial_new_centers, partial_new_centers_len)
     {
@@ -227,6 +237,9 @@ float **kmeans_clustering(float **feature, /* in: [npoints][nfeatures] */
     }
 
   } while (delta > threshold && loop++ < 500);
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+#endif
 
   free(new_centers[0]);
   free(new_centers);
