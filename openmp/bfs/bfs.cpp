@@ -50,50 +50,53 @@ void BFSGraph(int argc, char **argv) {
 
   printf("Reading File\n");
   // Read in Graph from a file
-  fp = fopen(input_f, "r");
+  fp = fopen(input_f, "rb");
   if (!fp) {
     printf("Error Reading graph file\n");
     return;
   }
 
-  int source = 0;
-
-  fscanf(fp, "%d", &no_of_nodes);
+  fread(&no_of_nodes, sizeof(no_of_nodes), 1, fp);
 
   // allocate host memory
   Node *h_graph_nodes = (Node *)malloc(sizeof(Node) * no_of_nodes);
   bool *h_graph_mask = (bool *)malloc(sizeof(bool) * no_of_nodes);
   bool *h_updating_graph_mask = (bool *)malloc(sizeof(bool) * no_of_nodes);
   bool *h_graph_visited = (bool *)malloc(sizeof(bool) * no_of_nodes);
-
+  
   int start, edgeno;
   // initalize the memory
+  uint32_t *start_edge_no = (uint32_t *)malloc(sizeof(uint32_t) * no_of_nodes * 2);
+  fread(start_edge_no, sizeof(start_edge_no[0]), no_of_nodes * 2, fp);
   for (unsigned int i = 0; i < no_of_nodes; i++) {
-    fscanf(fp, "%d %d", &start, &edgeno);
-    h_graph_nodes[i].starting = start;
-    h_graph_nodes[i].no_of_edges = edgeno;
+    h_graph_nodes[i].starting = start_edge_no[i * 2 + 0];
+    h_graph_nodes[i].no_of_edges = start_edge_no[i * 2 + 1];
     h_graph_mask[i] = false;
     h_updating_graph_mask[i] = false;
     h_graph_visited[i] = false;
   }
+  free(start_edge_no);
 
   // read the source node from the file
-  fscanf(fp, "%d", &source);
-  // source=0; //tesing code line
+  int source = 0;
+  fread(&source, sizeof(source), 1, fp);
 
   // set the source node as true in the mask
   h_graph_mask[source] = true;
   h_graph_visited[source] = true;
 
-  fscanf(fp, "%d", &edge_list_size);
+  fread(&edge_list_size, sizeof(edge_list_size), 1, fp);
 
   int id, cost;
   int *h_graph_edges = (int *)malloc(sizeof(int) * edge_list_size);
+
+  uint32_t *edge_cost = (uint32_t *)malloc(sizeof(uint32_t) * edge_list_size * 2);
+  fread(edge_cost, sizeof(edge_cost[0]), edge_list_size * 2, fp);
   for (int i = 0; i < edge_list_size; i++) {
-    fscanf(fp, "%d", &id);
-    fscanf(fp, "%d", &cost);
+    id = edge_cost[i * 2 + 0];
     h_graph_edges[i] = id;
   }
+  free(edge_cost);
 
   if (fp)
     fclose(fp);
