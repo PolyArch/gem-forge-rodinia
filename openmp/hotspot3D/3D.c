@@ -5,6 +5,11 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <omp.h>
+
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
 
 #define STR_SIZE (256)
 #define MAX_PD (3.0e6)
@@ -33,19 +38,7 @@ void readinput(float *vect, int grid_rows, int grid_cols, int layers,
 
   if ((fp = fopen(file, "r")) == 0)
     fatal("The file was not opened");
-
-  for (i = 0; i <= grid_rows - 1; i++)
-    for (j = 0; j <= grid_cols - 1; j++)
-      for (k = 0; k <= layers - 1; k++) {
-        if (fgets(str, STR_SIZE, fp) == NULL)
-          fatal("Error reading file\n");
-        if (feof(fp))
-          fatal("not enough lines in file");
-        if ((sscanf(str, "%f", &val) != 1))
-          fatal("invalid file format");
-        vect[i * grid_cols + j + k * grid_rows * grid_cols] = val;
-      }
-
+  fread(vect, sizeof(float), grid_rows * grid_cols * layers, fp);
   fclose(fp);
 }
 
@@ -137,9 +130,6 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
     float *tIn_t = tIn;
     float *tOut_t = tOut;
 
-#pragma omp master
-    printf("%d threads running\n", omp_get_num_threads());
-
     do {
       int z;
 #pragma omp for
@@ -173,7 +163,7 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
 
 void usage(int argc, char **argv) {
   fprintf(stderr,
-          "Usage: %s <rows/cols> <layers> <iterations> <powerFile> <tempFile> "
+          "Usage: %s <rows/cols> <layers> <iterations> <nthreads> <powerFile> <tempFile> "
           "<outputFile>\n",
           argv[0]);
   fprintf(
@@ -183,6 +173,7 @@ void usage(int argc, char **argv) {
           "\t<layers>  - number of layers in the grid (positive integer)\n");
 
   fprintf(stderr, "\t<iteration> - number of iterations\n");
+  fprintf(stderr, "\t<nthreads - number of threads to use\n");
   fprintf(stderr, "\t<powerFile>  - name of the file containing the initial "
                   "power values of each cell\n");
   fprintf(stderr, "\t<tempFile>  - name of the file containing the initial "
@@ -192,20 +183,20 @@ void usage(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7) {
+  if (argc != 8) {
     usage(argc, argv);
   }
 
   char *pfile, *tfile, *ofile; // *testFile;
-  int iterations = atoi(argv[3]);
 
-  pfile = argv[4];
-  tfile = argv[5];
-  ofile = argv[6];
-  // testFile = argv[7];
+  pfile = argv[5];
+  tfile = argv[6];
+  ofile = argv[7];
   int numCols = atoi(argv[1]);
   int numRows = atoi(argv[1]);
   int layers = atoi(argv[2]);
+  int iterations = atoi(argv[3]);
+  int numThreads = atoi(argv[4]);
 
   /* calculating parameters*/
 
@@ -242,8 +233,20 @@ int main(int argc, char **argv) {
   struct timeval start, stop;
   float time;
   gettimeofday(&start, NULL);
+
+  omp_set_dynamic(0);
+  omp_set_num_threads(numThreads);
+  printf("%d threads running\n", omp_get_num_threads());
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
   computeTempOMP(powerIn, tempIn, tempOut, numCols, numRows, layers, Cap, Rx,
                  Ry, Rz, dt, iterations);
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
+#endif
   gettimeofday(&stop, NULL);
   time = (stop.tv_usec - start.tv_usec) * 1.0e-6 + stop.tv_sec - start.tv_sec;
   computeTempCPU(powerIn, tempCopy, answer, numCols, numRows, layers, Cap, Rx,
