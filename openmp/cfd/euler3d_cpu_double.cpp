@@ -6,13 +6,13 @@
 #include <iostream>
 #include <omp.h>
 
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
+
 struct double3 {
   double x, y, z;
 };
-
-#ifndef block_length
-#error "you need to define block_length"
-#endif
 
 /*
  * Options
@@ -375,11 +375,12 @@ void time_step(int j, int nelr, double *old_variables, double *variables,
  * Main function
  */
 int main(int argc, char **argv) {
-  if (argc < 2) {
-    std::cout << "specify data file name" << std::endl;
+  if (argc < 3) {
+    std::cout << "<data file> <num of threads>" << std::endl;
     return 0;
   }
   const char *data_file_name = argv[1];
+  int num_threads = atoi(argv[2]);
 
   // set far field conditions
   {
@@ -424,33 +425,24 @@ int main(int argc, char **argv) {
   int *elements_surrounding_elements;
   double *normals;
   {
-    std::ifstream file(data_file_name);
 
-    file >> nel;
-    nelr =
-        block_length * ((nel / block_length) + std::min(1, nel % block_length));
+    auto infile = fopen(data_file_name, "rb");
+    fread(&nel, sizeof(nel), 1, infile);
+    printf("Read in nel = %d.\n", nel);
+
+    // Round nel up to num_threads
+    nelr = num_threads * ((nel / num_threads) + std::min(1, nel % num_threads));
 
     areas = new double[nelr];
     elements_surrounding_elements = new int[nelr * NNB];
     normals = new double[NDIM * NNB * nelr];
 
     // read in data
-    for (int i = 0; i < nel; i++) {
-      file >> areas[i];
-      for (int j = 0; j < NNB; j++) {
-        file >> elements_surrounding_elements[i * NNB + j];
-        if (elements_surrounding_elements[i * NNB + j] < 0)
-          elements_surrounding_elements[i * NNB + j] = -1;
-        elements_surrounding_elements[i * NNB + j]--; // it's coming in with
-                                                      // Fortran numbering
-
-        for (int k = 0; k < NDIM; k++) {
-          file >> normals[(i * NNB + j) * NDIM + k];
-          normals[(i * NNB + j) * NDIM + k] =
-              -normals[(i * NNB + j) * NDIM + k];
-        }
-      }
-    }
+    fread(areas, sizeof(areas[0]), nel, infile);
+    fread(elements_surrounding_elements,
+          sizeof(elements_surrounding_elements[0]), nel * NNB, infile);
+    fread(normals, sizeof(normals[0]), NDIM * NNB * nel, infile);
+    fclose(infile);
 
     // fill in remaining data
     int last = nel - 1;
@@ -475,9 +467,18 @@ int main(int argc, char **argv) {
   double *fluxes = alloc<double>(nelr * NVAR);
   double *step_factors = alloc<double>(nelr);
 
+  // Setting the number of threads.
+  omp_set_dynamic(0);
+  omp_set_num_threads(num_threads);
+  omp_set_schedule(omp_sched_static, 0);
+
   // these need to be computed the first time in order to compute time step
   std::cout << "Starting..." << std::endl;
   double start = omp_get_wtime();
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
 
   // Begin iterations
   for (int i = 0; i < iterations; i++) {
@@ -492,6 +493,11 @@ int main(int argc, char **argv) {
       time_step(j, nelr, old_variables, variables, step_factors, fluxes);
     }
   }
+
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
+#endif
 
   double end = omp_get_wtime();
   std::cout << (end - start) / iterations << " seconds per iteration"
