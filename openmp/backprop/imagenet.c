@@ -3,9 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-extern layer_size;
-
-load(BPNN *net) {
+void load(BPNN *net) {
   float *units;
   int nr, nc, imgsize, i, j, k;
 
@@ -16,7 +14,7 @@ load(BPNN *net) {
 
   k = 1;
   for (i = 0; i < nr; i++) {
-    units[k] = (float)rand() / RAND_MAX;
+    units[k] = (float)rand() / (float)RAND_MAX;
     k++;
   }
 }

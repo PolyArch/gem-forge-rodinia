@@ -5,7 +5,6 @@
 
 #define ETA 0.3      // eta value
 #define MOMENTUM 0.3 // momentum value
-#define NUM_THREAD 8 // OpenMP threads
 
 typedef struct {
   int input_n;  /* number of input units */
@@ -42,4 +41,8 @@ void bpnn_feedforward();
 void bpnn_save();
 BPNN *bpnn_read();
 
+extern int layer_size;
+extern int num_threads;
+void bpnn_train_kernel(BPNN *net, float *eo, float *eh);
+void load(BPNN *net);
 #endif

@@ -8,8 +8,9 @@ extern char *strcpy();
 extern void exit();
 
 int layer_size = 0;
+int num_threads = 0;
 
-backprop_face() {
+void backprop_face() {
   BPNN *net;
   int i;
   float out_err, hid_err;
@@ -24,13 +25,15 @@ backprop_face() {
 }
 
 int setup(int argc, char *argv[]) {
-  if (argc != 2) {
-    fprintf(stderr, "usage: backprop <num of input elements>\n");
+  if (argc != 3) {
+    fprintf(stderr,
+            "usage: backprop <num of input elements> <num of threads>\n");
     exit(0);
   }
 
   layer_size = atoi(argv[1]);
-
+  num_threads = atoi(argv[2]);
+  printf("Use number of threads %d.\n", num_threads);
   int seed;
 
   seed = 7;

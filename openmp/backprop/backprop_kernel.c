@@ -1,10 +1,15 @@
 #include <math.h>
+#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 
 #include "backprop.h"
+
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -46,6 +51,13 @@ void bpnn_train_kernel(BPNN *net, float *eo, float *eh) {
   out = net->output_n;
 
   printf("Performing CPU computation\n");
+  omp_set_dynamic(0);
+  omp_set_num_threads(num_threads);
+  omp_set_schedule(omp_sched_static, 0);
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
   bpnn_layerforward(net->input_units, net->hidden_units, net->input_weights, in,
                     hid);
   bpnn_layerforward(net->hidden_units, net->output_units, net->hidden_weights,
@@ -58,4 +70,8 @@ void bpnn_train_kernel(BPNN *net, float *eo, float *eh) {
                       net->hidden_weights, net->hidden_prev_weights);
   bpnn_adjust_weights(net->hidden_delta, hid, net->input_units, in,
                       net->input_weights, net->input_prev_weights);
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
+#endif
 }

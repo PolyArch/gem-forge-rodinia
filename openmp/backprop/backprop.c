@@ -12,6 +12,12 @@
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #define OPEN
 
 #define ABS(x) (((x) > 0.0) ? (x) : (-(x)))
@@ -78,22 +84,18 @@ float **alloc_2d_dbl(m, n) int m, n;
   return (new);
 }
 
-bpnn_randomize_weights(w, m, n) float **w;
-int m, n;
-{
+void bpnn_randomize_weights(float **w, int m, int n) {
   int i, j;
 
   for (i = 0; i <= m; i++) {
     for (j = 0; j <= n; j++) {
-      w[i][j] = (float)rand() / RAND_MAX;
+      w[i][j] = (float)rand() / (float)RAND_MAX;
       //  w[i][j] = dpn1();
     }
   }
 }
 
-bpnn_randomize_row(w, m) float *w;
-int m;
-{
+void bpnn_randomize_row(float *w, int m) {
   int i;
   for (i = 0; i <= m; i++) {
     // w[i] = (float) rand()/RAND_MAX;
@@ -101,7 +103,7 @@ int m;
   }
 }
 
-bpnn_zero_weights(w, m, n) float **w;
+void bpnn_zero_weights(w, m, n) float **w;
 int m, n;
 {
   int i, j;
@@ -113,7 +115,7 @@ int m, n;
   }
 }
 
-void bpnn_initialize(seed) {
+void bpnn_initialize(int seed) {
   printf("Random number generator seed: %d\n", seed);
   srand(seed);
 }
@@ -217,7 +219,6 @@ int n1, n2;
   /*** Set up thresholding unit ***/
   l1[0] = 1.0;
 #ifdef OPEN
-  omp_set_num_threads(NUM_THREAD);
 #pragma omp parallel for shared(conn, n1, n2, l1) private(k, j) reduction(+: sum) schedule(static)
 #endif
   /*** For each unit in second layer ***/
@@ -270,9 +271,8 @@ int nh, no;
   *err = errsum;
 }
 
-void bpnn_adjust_weights(delta, ndelta, ly, nly, w, oldw) float *delta, *ly,
-    **w, **oldw;
-{
+void bpnn_adjust_weights(float *delta, int ndelta, float *ly, int nly,
+                         float **w, float **oldw) {
   float new_dw;
   int k, j;
   ly[0] = 1.0;
@@ -280,7 +280,6 @@ void bpnn_adjust_weights(delta, ndelta, ly, nly, w, oldw) float *delta, *ly,
   // momentum = 0.3;
 
 #ifdef OPEN
-  omp_set_num_threads(NUM_THREAD);
 #pragma omp parallel for shared(oldw, w, delta) private(j, k, new_dw)          \
     firstprivate(ndelta, nly)
 #endif
