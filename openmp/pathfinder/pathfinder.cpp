@@ -1,126 +1,140 @@
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <assert.h>
+
+#include <omp.h>
 
 #include "timer.h"
 
-void run(int argc, char** argv);
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
+
+void run(int argc, char **argv);
 
 /* define timer macros */
-#define pin_stats_reset()   startCycle()
-#define pin_stats_pause(cycles)   stopCycle(cycles)
-#define pin_stats_dump(cycles)    printf("timer: %Lu\n", cycles)
+#define pin_stats_reset() startCycle()
+#define pin_stats_pause(cycles) stopCycle(cycles)
+#define pin_stats_dump(cycles) printf("timer: %Lu\n", cycles)
 
-#define BENCH_PRINT
+// #define BENCH_PRINT
 
 int rows, cols;
-int* data;
-int** wall;
-int* result;
+int num_threads;
+int *data;
+int **wall;
+int *result;
 #define M_SEED 9
 
-void
-init(int argc, char** argv)
-{
-	if(argc==3){
-		cols = atoi(argv[1]);
-		rows = atoi(argv[2]);
-	}else{
-                printf("Usage: pathfiner width num_of_steps\n");
-                exit(0);
-        }
-	data = new int[rows*cols];
-	wall = new int*[rows];
-	for(int n=0; n<rows; n++)
-		wall[n]=data+cols*n;
-	result = new int[cols];
-	
-	int seed = M_SEED;
-	srand(seed);
+void init(int argc, char **argv) {
+  if (argc == 4) {
+    cols = atoi(argv[1]);
+    rows = atoi(argv[2]);
+    num_threads = atoi(argv[3]);
+  } else {
+    printf("Usage: pathfiner width num_of_steps num_of_threads\n");
+    exit(0);
+  }
+  data = new int[rows * cols];
+  wall = new int *[rows];
+  for (int n = 0; n < rows; n++)
+    wall[n] = data + cols * n;
+  result = new int[cols];
 
-	for (int i = 0; i < rows; i++)
-    {
-        for (int j = 0; j < cols; j++)
-        {
-            wall[i][j] = rand() % 10;
-        }
+  int seed = M_SEED;
+  srand(seed);
+
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j++) {
+      wall[i][j] = rand() % 10;
     }
-    for (int j = 0; j < cols; j++)
-        result[j] = wall[0][j];
+  }
+  for (int j = 0; j < cols; j++)
+    result[j] = wall[0][j];
 #ifdef BENCH_PRINT
-    for (int i = 0; i < rows; i++)
-    {
-        for (int j = 0; j < cols; j++)
-        {
-            printf("%d ",wall[i][j]) ;
-        }
-        printf("\n") ;
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j++) {
+      printf("%d ", wall[i][j]);
     }
+    printf("\n");
+  }
 #endif
 }
 
-void 
-fatal(char *s)
-{
-	fprintf(stderr, "error: %s\n", s);
+void fatal(char *s) { fprintf(stderr, "error: %s\n", s); }
 
+#define IN_RANGE(x, min, max) ((x) >= (min) && (x) <= (max))
+#define CLAMP_RANGE(x, min, max) x = (x < (min)) ? min : ((x > (max)) ? max : x)
+#define MIN(a, b) ((a) <= (b) ? (a) : (b))
+
+int main(int argc, char **argv) {
+  run(argc, argv);
+
+  return EXIT_SUCCESS;
 }
 
-#define IN_RANGE(x, min, max)   ((x)>=(min) && (x)<=(max))
-#define CLAMP_RANGE(x, min, max) x = (x<(min)) ? min : ((x>(max)) ? max : x )
-#define MIN(a, b) ((a)<=(b) ? (a) : (b))
+void run(int argc, char **argv) {
+  init(argc, argv);
 
-int main(int argc, char** argv)
-{
-    run(argc,argv);
+  unsigned long long cycles;
 
-    return EXIT_SUCCESS;
-}
+  int *src, *dst, *temp;
+  int min;
 
-void run(int argc, char** argv)
-{
-    init(argc, argv);
+  dst = result;
+  src = new int[cols];
 
-    unsigned long long cycles;
+  pin_stats_reset();
 
-    int *src, *dst, *temp;
-    int min;
+  printf("Running with threads %d.\n", num_threads);
+  omp_set_dynamic(0);
+  omp_set_num_threads(num_threads);
+  omp_set_schedule(omp_sched_static, 0);
 
-    dst = result;
-    src = new int[cols];
-
-    pin_stats_reset();
-    for (int t = 0; t < rows-1; t++) {
-        temp = src;
-        src = dst;
-        dst = temp;
-        #pragma omp parallel for private(min)
-        for(int n = 0; n < cols; n++){
-          min = src[n];
-          if (n > 0)
-            min = MIN(min, src[n-1]);
-          if (n < cols-1)
-            min = MIN(min, src[n+1]);
-          dst[n] = wall[t+1][n]+min;
-        }
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
+  for (int t = 0; t < rows - 1; t++) {
+    temp = src;
+    src = dst;
+    dst = temp;
+#pragma omp parallel for private(min)
+    for (int n = 0; n < cols; n++) {
+      min = src[n];
+      if (n > 0)
+        min = MIN(min, src[n - 1]);
+      if (n < cols - 1)
+        min = MIN(min, src[n + 1]);
+      dst[n] = wall[t + 1][n] + min;
     }
-
-    pin_stats_pause(cycles);
-    pin_stats_dump(cycles);
-
-#ifdef BENCH_PRINT
-    for (int i = 0; i < cols; i++)
-            printf("%d ",data[i]) ;
-    printf("\n") ;
-    for (int i = 0; i < cols; i++)
-            printf("%d ",dst[i]) ;
-    printf("\n") ;
+  }
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
 #endif
 
-    delete [] data;
-    delete [] wall;
-    delete [] dst;
-    delete [] src;
-}
+  pin_stats_pause(cycles);
+  pin_stats_dump(cycles);
 
+#ifdef BENCH_PRINT
+
+  for (int i = 0; i < cols; i++)
+
+    printf("%d ", data[i]);
+
+  printf("\n");
+
+  for (int i = 0; i < cols; i++)
+
+    printf("%d ", dst[i]);
+
+  printf("\n");
+
+#endif
+
+  delete[] data;
+  delete[] wall;
+  delete[] dst;
+  delete[] src;
+}
