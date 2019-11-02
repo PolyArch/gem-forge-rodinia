@@ -11,13 +11,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
+
 void random_matrix(float *I, int rows, int cols);
 
 void usage(int argc, char **argv) {
-  fprintf(stderr,
-          "Usage: %s <rows> <cols> <y1> <y2> <x1> <x2> <no. of threads><lamda> "
-          "<no. of iter>\n",
-          argv[0]);
+  fprintf(
+      stderr,
+      "Usage: %s <rows> <cols> <y1> <y2> <x1> <x2> <no. of threads> <lambda> "
+      "<no. of iter>\n",
+      argv[0]);
   fprintf(stderr, "\t<rows>   - number of rows\n");
   fprintf(stderr, "\t<cols>    - number of cols\n");
   fprintf(stderr, "\t<y1> 	 - y1 value of the speckle\n");
@@ -25,7 +30,7 @@ void usage(int argc, char **argv) {
   fprintf(stderr, "\t<x1>       - x1 value of the speckle\n");
   fprintf(stderr, "\t<x2>       - x2 value of the speckle\n");
   fprintf(stderr, "\t<no. of threads>  - no. of threads\n");
-  fprintf(stderr, "\t<lamda>   - lambda (0,1)\n");
+  fprintf(stderr, "\t<lambda>   - lambda (0,1)\n");
   fprintf(stderr, "\t<no. of iter>   - number of iterations\n");
 
   exit(1);
@@ -101,6 +106,10 @@ int main(int argc, char *argv[]) {
   }
 
   printf("Start the SRAD main loop\n");
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
 
 #ifdef ITERATION
   for (iter = 0; iter < niter; iter++) {
@@ -179,17 +188,16 @@ int main(int argc, char *argv[]) {
 
         // image update (equ 61)
         J[k] = J[k] + 0.25 * lambda * D;
-#ifdef OUTPUT
-// printf("%.5f ", J[k]);
-#endif // output
       }
-#ifdef OUTPUT
-// printf("\n");
-#endif // output
     }
 
 #ifdef ITERATION
   }
+#endif
+
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
 #endif
 
 #ifdef OUTPUT
