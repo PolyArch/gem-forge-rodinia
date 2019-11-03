@@ -26,6 +26,10 @@
 #include <string.h>
 #include <omp.h>
 
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
+
 #include "define.c"
 #include "graphics.c"
 #include "resize.c"
@@ -123,9 +127,13 @@ int main(int argc, char *argv []){
 		threads = atoi(argv[5]);
 	}
 
+#ifdef GEM_FORGE
+	omp_set_dynamic(0);
+	omp_set_schedule(omp_sched_static, 0);
+#endif
 	omp_set_num_threads(threads);
 	// printf("THREAD %d\n", omp_get_thread_num());
-	// printf("NUMBER OF THREADS: %d\n", omp_get_num_threads());
+	printf("NUMBER OF THREADS: %d\n", omp_get_num_threads());
 
 	time2 = get_time();
 
@@ -140,7 +148,7 @@ int main(int argc, char *argv []){
 
 	image_ori = (fp*)malloc(sizeof(fp) * image_ori_elem);
 
-	read_graphics(	"../../../data/srad/image.pgm",
+	read_graphics(	"../../data/srad/image.pgm",
 								image_ori,
 								image_ori_rows,
 								image_ori_cols,
@@ -228,6 +236,9 @@ int main(int argc, char *argv []){
 	//================================================================================80
 
 	// printf("iterations: ");
+#ifdef GEM_FORGE
+    m5_detail_sim_start();
+#endif
 
     // primary loop
     for (iter=0; iter<niter; iter++){										// do for the number of iterations input parameter
@@ -319,6 +330,10 @@ int main(int argc, char *argv []){
         }
 
 	}
+#ifdef GEM_FORGE
+    m5_detail_sim_end();
+    exit(0);
+#endif
 
 	// printf("\n");
 
