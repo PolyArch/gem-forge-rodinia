@@ -1,5 +1,5 @@
 # C compiler
-CC=clang
+CC=clang++
 
 include ../GemForge.Makefile.include
 
@@ -7,19 +7,10 @@ all: bfs.exe
 
 riscv: raw.riscv.exe
 
-cluster.bc: cluster.c 
-	$(CC) $(CC_FLAGS) $^ -emit-llvm -c -o $@
-	
-getopt.bc: getopt.c 
-	$(CC) $(CC_FLAGS) $^ -emit-llvm -c -o $@
-	
-kmeans.bc: kmeans.c 
+hotspot_openmp.bc: hotspot_openmp.cpp
 	$(CC) $(CC_FLAGS) $^ -emit-llvm -c -o $@
 
-kmeans_clustering.bc: kmeans_clustering.c
-	$(CC) $(CC_FLAGS) $^ -emit-llvm -c -o $@
-
-raw.bc: cluster.bc getopt.bc kmeans.bc kmeans_clustering.bc
+raw.bc: hotspot_openmp.bc
 	llvm-link $^ -o $@
 	opt -instnamer $@ -o $@
 

@@ -1,12 +1,7 @@
 # C compiler
 CC=clang++
-CC_FLAGS=-gline-tables-only -fopenmp -O3 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops -I/home/zhengrong/Documents/llvm-trace-cpu/include
 
-RISCV_INSTALL=/home/zhengrong/Documents/riscv/install
-RISCV_SYSROOT=${RISCV_INSTALL}/sysroot
-RISCV_CC_FLAGS=--target=riscv64-unknown-linux-gnu -march=rv64g -mabi=lp64d --sysroot=${RISCV_SYSROOT}
-RISCV_GCC=${RISCV_INSTALL}/bin/riscv64-unknown-linux-gnu-g++
-RISCV_LD_FLAGS=-lomp -lpthread -static -Wl,--no-as-needed -ldl
+include ../GemForge.Makefile.include
 
 all: bfs.exe
 
