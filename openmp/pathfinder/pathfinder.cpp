@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -20,7 +21,7 @@ void run(int argc, char **argv);
 
 // #define BENCH_PRINT
 
-int rows, cols;
+int64_t rows, cols;
 int num_threads;
 int *data;
 int **wall;
@@ -78,12 +79,12 @@ int main(int argc, char **argv) {
 }
 
 __attribute__((noinline)) void pathfinder(int *src, int *dst) {
-  for (int t = 0; t < rows - 1; t++) {
+  for (int64_t t = 0; t < rows - 1; t++) {
     int *temp = src;
     src = dst;
     dst = temp;
 #pragma omp parallel for firstprivate(cols, t) schedule(static)
-    for (int n = 0; n < cols; n++) {
+    for (int64_t n = 0; n < cols; n++) {
       int min = src[n];
       if (n > 0)
         min = MIN(min, src[n - 1]);
