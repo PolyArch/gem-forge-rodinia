@@ -45,6 +45,8 @@ void init(int argc, char **argv) {
   int seed = M_SEED;
   srand(seed);
 
+#ifndef GEM_FORGE
+  // No need to initialize as it's data independent.
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j++) {
       wall[i][j] = rand() % 10;
@@ -52,6 +54,7 @@ void init(int argc, char **argv) {
   }
   for (int j = 0; j < cols; j++)
     result[j] = wall[0][j];
+#endif
 #ifdef BENCH_PRINT
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j++) {
@@ -72,6 +75,23 @@ int main(int argc, char **argv) {
   run(argc, argv);
 
   return EXIT_SUCCESS;
+}
+
+__attribute__((noinline)) void pathfinder(int *src, int *dst) {
+  for (int t = 0; t < rows - 1; t++) {
+    int *temp = src;
+    src = dst;
+    dst = temp;
+#pragma omp parallel for firstprivate(cols, t) schedule(static)
+    for (int n = 0; n < cols; n++) {
+      int min = src[n];
+      if (n > 0)
+        min = MIN(min, src[n - 1]);
+      if (n < cols - 1)
+        min = MIN(min, src[n + 1]);
+      dst[n] = wall[t + 1][n] + min;
+    }
+  }
 }
 
 void run(int argc, char **argv) {
@@ -95,20 +115,7 @@ void run(int argc, char **argv) {
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #endif
-  for (int t = 0; t < rows - 1; t++) {
-    temp = src;
-    src = dst;
-    dst = temp;
-#pragma omp parallel for private(min)
-    for (int n = 0; n < cols; n++) {
-      min = src[n];
-      if (n > 0)
-        min = MIN(min, src[n - 1]);
-      if (n < cols - 1)
-        min = MIN(min, src[n + 1]);
-      dst[n] = wall[t + 1][n] + min;
-    }
-  }
+  pathfinder(src, dst);
 #ifdef GEM_FORGE
   m5_detail_sim_end();
   exit(0);
