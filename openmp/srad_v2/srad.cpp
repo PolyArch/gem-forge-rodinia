@@ -39,8 +39,7 @@ void usage(int argc, char **argv) {
 int main(int argc, char *argv[]) {
   int rows, cols, size_I, size_R, niter = 10, iter, k;
   float *I, *J, q0sqr, sum, sum2, tmp, meanROI, varROI;
-  float Jc, G2, L, num, den, qsqr;
-  int *iN, *iS, *jE, *jW;
+  float G2, L, num, den, qsqr;
   float *dN, *dS, *dW, *dE;
   int r1, r2, c1, c2;
   float cN, cS, cW, cE;
@@ -72,30 +71,12 @@ int main(int argc, char *argv[]) {
 
   I = (float *)malloc(size_I * sizeof(float));
   J = (float *)malloc(size_I * sizeof(float));
-  c = (float *)malloc(sizeof(float) * size_I);
-
-  iN = (int *)malloc(sizeof(unsigned int *) * rows);
-  iS = (int *)malloc(sizeof(unsigned int *) * rows);
-  jW = (int *)malloc(sizeof(unsigned int *) * cols);
-  jE = (int *)malloc(sizeof(unsigned int *) * cols);
+  c = (float *)malloc(size_I * sizeof(float));
 
   dN = (float *)malloc(sizeof(float) * size_I);
   dS = (float *)malloc(sizeof(float) * size_I);
   dW = (float *)malloc(sizeof(float) * size_I);
   dE = (float *)malloc(sizeof(float) * size_I);
-
-  for (int i = 0; i < rows; i++) {
-    iN[i] = i - 1;
-    iS[i] = i + 1;
-  }
-  for (int j = 0; j < cols; j++) {
-    jW[j] = j - 1;
-    jE[j] = j + 1;
-  }
-  iN[0] = 0;
-  iS[rows - 1] = rows - 1;
-  jW[0] = 0;
-  jE[cols - 1] = cols - 1;
 
   printf("Randomizing the input matrix\n");
 
@@ -137,18 +118,31 @@ int main(int argc, char *argv[]) {
       for (int j = 0; j < cols; j++) {
 
         k = i * cols + j;
-        Jc = J[k];
+        float Jc = J[k];
 
         // directional derivates
-        dN[k] = J[iN[i] * cols + j] - Jc;
-        dS[k] = J[iS[i] * cols + j] - Jc;
-        dW[k] = J[i * cols + jW[j]] - Jc;
-        dE[k] = J[i * cols + jE[j]] - Jc;
+        float dNValue = 0.0f;
+        float dSValue = 0.0f;
+        float dWValue = 0.0f;
+        float dEValue = 0.0f;
+        if (i > 0) {
+          dNValue = J[(i - 1) * cols + j] - Jc;
+        }
+        if (i + 1 < rows) {
+          dSValue = J[(i + 1) * cols + j] - Jc;
+        }
+        if (j > 0) {
+          dWValue = J[k - 1] - Jc;
+        }
+        if (j + 1 < cols) {
+          dEValue = J[k + 1] - Jc;
+        }
 
-        G2 = (dN[k] * dN[k] + dS[k] * dS[k] + dW[k] * dW[k] + dE[k] * dE[k]) /
+        G2 = (dNValue * dNValue + dSValue * dSValue + dWValue * dWValue +
+              dEValue * dEValue) /
              (Jc * Jc);
 
-        L = (dN[k] + dS[k] + dW[k] + dE[k]) / Jc;
+        L = (dNValue + dSValue + dWValue + dEValue) / Jc;
 
         num = (0.5 * G2) - ((1.0 / 16.0) * (L * L));
         den = 1 + (.25 * L);
@@ -164,6 +158,11 @@ int main(int argc, char *argv[]) {
         } else if (c[k] > 1) {
           c[k] = 1;
         }
+
+        dN[k] = dNValue;
+        dS[k] = dSValue;
+        dW[k] = dWValue;
+        dE[k] = dEValue;
       }
     }
 #ifdef OPEN
@@ -214,10 +213,6 @@ int main(int argc, char *argv[]) {
 
   free(I);
   free(J);
-  free(iN);
-  free(iS);
-  free(jW);
-  free(jE);
   free(dN);
   free(dS);
   free(dW);
