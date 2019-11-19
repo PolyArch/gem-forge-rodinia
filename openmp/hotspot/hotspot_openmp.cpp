@@ -1,7 +1,12 @@
 #include <omp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
+
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
+#endif
 
 // Returns the current system time in microseconds
 long long get_time() {
@@ -9,8 +14,6 @@ long long get_time() {
   gettimeofday(&tv, NULL);
   return (tv.tv_sec * 1000000) + tv.tv_usec;
 }
-
-using namespace std;
 
 #define BLOCK_SIZE 16
 #define BLOCK_SIZE_C BLOCK_SIZE
@@ -52,107 +55,53 @@ int num_omp_threads;
 void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
                       int col, FLOAT Cap_1, FLOAT Rx_1, FLOAT Ry_1, FLOAT Rz_1,
                       FLOAT step) {
-  FLOAT delta;
-  int r, c;
-  int chunk;
-  int num_chunk = row * col / (BLOCK_SIZE_R * BLOCK_SIZE_C);
-  int chunks_in_row = col / BLOCK_SIZE_C;
-  int chunks_in_col = row / BLOCK_SIZE_R;
+  uint64_t num_chunk = row * col / (BLOCK_SIZE_R * BLOCK_SIZE_C);
+  uint64_t chunks_in_row = col / BLOCK_SIZE_C;
+  uint64_t chunks_in_col = row / BLOCK_SIZE_R;
 
 #ifdef OPEN
 #ifndef __MIC__
   omp_set_num_threads(num_omp_threads);
 #endif
-#pragma omp parallel for shared(power, temp, result) private(chunk, r, c,      \
-                                                             delta)            \
-    firstprivate(row, col, num_chunk, chunks_in_row) schedule(static)
+#pragma omp parallel for shared(power, temp, result)                           \
+    firstprivate(row, col, num_chunk, chunks_in_row, chunks_in_col, Cap_1,     \
+                 Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
 #endif
-  for (chunk = 0; chunk < num_chunk; ++chunk) {
-    int r_start = BLOCK_SIZE_R * (chunk / chunks_in_col);
-    int c_start = BLOCK_SIZE_C * (chunk % chunks_in_row);
-    int r_end = r_start + BLOCK_SIZE_R > row ? row : r_start + BLOCK_SIZE_R;
-    int c_end = c_start + BLOCK_SIZE_C > col ? col : c_start + BLOCK_SIZE_C;
+  for (uint64_t chunk = 0; chunk < num_chunk; ++chunk) {
+    uint64_t r_start = BLOCK_SIZE_R * (chunk / chunks_in_col);
+    uint64_t c_start = BLOCK_SIZE_C * (chunk % chunks_in_row);
+    uint64_t r_end = r_start + BLOCK_SIZE_R;
+    uint64_t c_end = c_start + BLOCK_SIZE_C;
 
-    if (r_start == 0 || c_start == 0 || r_end == row || c_end == col) {
-      for (r = r_start; r < r_start + BLOCK_SIZE_R; ++r) {
-        for (c = c_start; c < c_start + BLOCK_SIZE_C; ++c) {
-          /* Corner 1 */
-          if ((r == 0) && (c == 0)) {
-            delta = (Cap_1) * (power[0] + (temp[1] - temp[0]) * Rx_1 +
-                               (temp[col] - temp[0]) * Ry_1 +
-                               (amb_temp - temp[0]) * Rz_1);
-          } /* Corner 2 */
-          else if ((r == 0) && (c == col - 1)) {
-            delta = (Cap_1) * (power[c] + (temp[c - 1] - temp[c]) * Rx_1 +
-                               (temp[c + col] - temp[c]) * Ry_1 +
-                               (amb_temp - temp[c]) * Rz_1);
-          } /* Corner 3 */
-          else if ((r == row - 1) && (c == col - 1)) {
-            delta = (Cap_1) *
-                    (power[r * col + c] +
-                     (temp[r * col + c - 1] - temp[r * col + c]) * Rx_1 +
-                     (temp[(r - 1) * col + c] - temp[r * col + c]) * Ry_1 +
-                     (amb_temp - temp[r * col + c]) * Rz_1);
-          } /* Corner 4	*/
-          else if ((r == row - 1) && (c == 0)) {
-            delta = (Cap_1) * (power[r * col] +
-                               (temp[r * col + 1] - temp[r * col]) * Rx_1 +
-                               (temp[(r - 1) * col] - temp[r * col]) * Ry_1 +
-                               (amb_temp - temp[r * col]) * Rz_1);
-          } /* Edge 1 */
-          else if (r == 0) {
-            delta =
-                (Cap_1) *
-                (power[c] + (temp[c + 1] + temp[c - 1] - 2.0 * temp[c]) * Rx_1 +
-                 (temp[col + c] - temp[c]) * Ry_1 +
-                 (amb_temp - temp[c]) * Rz_1);
-          } /* Edge 2 */
-          else if (c == col - 1) {
-            delta =
-                (Cap_1) * (power[r * col + c] +
-                           (temp[(r + 1) * col + c] + temp[(r - 1) * col + c] -
-                            2.0 * temp[r * col + c]) *
-                               Ry_1 +
-                           (temp[r * col + c - 1] - temp[r * col + c]) * Rx_1 +
-                           (amb_temp - temp[r * col + c]) * Rz_1);
-          } /* Edge 3 */
-          else if (r == row - 1) {
-            delta = (Cap_1) *
-                    (power[r * col + c] +
-                     (temp[r * col + c + 1] + temp[r * col + c - 1] -
-                      2.0 * temp[r * col + c]) *
-                         Rx_1 +
-                     (temp[(r - 1) * col + c] - temp[r * col + c]) * Ry_1 +
-                     (amb_temp - temp[r * col + c]) * Rz_1);
-          } /* Edge 4 */
-          else if (c == 0) {
-            delta = (Cap_1) * (power[r * col] +
-                               (temp[(r + 1) * col] + temp[(r - 1) * col] -
-                                2.0 * temp[r * col]) *
-                                   Ry_1 +
-                               (temp[r * col + 1] - temp[r * col]) * Rx_1 +
-                               (amb_temp - temp[r * col]) * Rz_1);
-          }
-          result[r * col + c] = temp[r * col + c] + delta;
+    for (uint64_t r = r_start; r < r_end; ++r) {
+      for (uint64_t c = c_start; c < c_end; ++c) {
+        uint64_t idx = r * col + c;
+        uint64_t idxE = idx + 1;
+        uint64_t idxW = idx - 1;
+        uint64_t idxS = idx + col;
+        uint64_t idxN = idx - col;
+        FLOAT powerC = power[idx];
+        FLOAT tempC = temp[idx];
+        FLOAT tempN = tempC;
+        FLOAT tempS = tempC;
+        FLOAT tempE = tempC;
+        FLOAT tempW = tempC;
+        if (r < row - 1) {
+          tempS = temp[idx + col];
         }
-      }
-      continue;
-    }
-
-    for (r = r_start; r < r_start + BLOCK_SIZE_R; ++r) {
-#pragma omp simd
-      for (c = c_start; c < c_start + BLOCK_SIZE_C; ++c) {
-        /* Update Temperatures */
-        result[r * col + c] =
-            temp[r * col + c] +
-            (Cap_1 * (power[r * col + c] +
-                      (temp[(r + 1) * col + c] + temp[(r - 1) * col + c] -
-                       2.f * temp[r * col + c]) *
-                          Ry_1 +
-                      (temp[r * col + c + 1] + temp[r * col + c - 1] -
-                       2.f * temp[r * col + c]) *
-                          Rx_1 +
-                      (amb_temp - temp[r * col + c]) * Rz_1));
+        if (r > 0) {
+          tempN = temp[idx - col];
+        }
+        if (c < col - 1) {
+          tempE = temp[idx + 1];
+        }
+        if (c > 0) {
+          tempW = temp[idx - 1];
+        }
+        FLOAT delta = Cap_1 * (powerC + (tempS + tempN - 2.f * tempC) * Ry_1 +
+                               (tempE + tempW - 2.f * tempC) * Rx_1 +
+                               (amb_temp - tempC) * Rz_1);
+        result[idx] = tempC + delta;
       }
     }
   }
@@ -250,17 +199,12 @@ void read_input(FLOAT *vect, int grid_rows, int grid_cols, char *file) {
   FLOAT val;
 
   fp = fopen(file, "r");
-  if (!fp)
-    fatal("file could not be opened for reading");
-
-  for (i = 0; i < grid_rows * grid_cols; i++) {
-    fgets(str, STR_SIZE, fp);
-    if (feof(fp))
-      fatal("not enough lines in file");
-    if ((sscanf(str, "%f", &val) != 1))
-      fatal("invalid file format");
-    vect[i] = val;
+  if (!fp) {
+    printf("file could not be opened for reading");
+    exit(1);
   }
+
+  fread(vect, sizeof(float), grid_rows * grid_cols, fp);
 
   fclose(fp);
 }
@@ -301,8 +245,10 @@ int main(int argc, char **argv) {
   temp = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
   power = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
   result = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
-  if (!temp || !power)
-    fatal("unable to allocate memory");
+  if (!temp || !power) {
+    printf("unable to allocate memory");
+    exit(1);
+  }
 
   /* read initial temperatures and input power	*/
   tfile = argv[5];
@@ -316,7 +262,14 @@ int main(int argc, char **argv) {
 
   long long start_time = get_time();
 
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#endif
   compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
+#endif
 
   long long end_time = get_time();
 
