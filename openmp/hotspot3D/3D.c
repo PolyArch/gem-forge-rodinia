@@ -1,11 +1,11 @@
 #include <assert.h>
 #include <math.h>
+#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
-#include <omp.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -111,9 +111,9 @@ float accuracy(float *arr1, float *arr2, int len) {
 
   return (float)sqrt(err / len);
 }
-void computeTempOMP(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
-                    float Cap, float Rx, float Ry, float Rz, float dt,
-                    int numiter) {
+void computeTempOMP(float *pIn, float *tIn, float *tOut, uint64_t nx,
+                    uint64_t ny, uint64_t nz, float Cap, float Rx, float Ry,
+                    float Rz, float dt, int numiter) {
 
   float ce, cw, cn, cs, ct, cb, cc;
 
@@ -124,31 +124,28 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
 
   cc = 1.0 - (2.0 * ce + 2.0 * cn + 3.0 * ct);
 
-#pragma omp parallel
   {
     int count = 0;
     float *tIn_t = tIn;
     float *tOut_t = tOut;
 
     do {
-      int z;
-#pragma omp for
-      for (z = 0; z < nz; z++) {
-        int y;
-        for (y = 0; y < ny; y++) {
-          int x;
-          for (x = 0; x < nx; x++) {
-            int c, w, e, n, s, b, t;
-            c = x + y * nx + z * nx * ny;
-            w = (x == 0) ? c : c - 1;
-            e = (x == nx - 1) ? c : c + 1;
-            n = (y == 0) ? c : c - nx;
-            s = (y == ny - 1) ? c : c + nx;
-            b = (z == 0) ? c : c - nx * ny;
-            t = (z == nz - 1) ? c : c + nx * ny;
-            tOut_t[c] = cc * tIn_t[c] + cw * tIn_t[w] + ce * tIn_t[e] +
-                        cs * tIn_t[s] + cn * tIn_t[n] + cb * tIn_t[b] +
-                        ct * tIn_t[t] + (dt / Cap) * pIn[c] + ct * amb_temp;
+#pragma omp parallel for schedule(static)                                      \
+    firstprivate(tIn_t, pIn, tOut_t, ce, cw, cn, cs, ct, cb, cc, nx, ny, nz,   \
+                 amb_temp, dt, Cap)
+      for (uint64_t z = 0; z < nz; z++) {
+        for (uint64_t y = 0; y < ny; y++) {
+          for (uint64_t x = 0; x < nx; x++) {
+            uint64_t c = x + y * nx + z * nx * ny;
+            float tc = tIn_t[c];
+            float tw = (x == 0) ? tc : tIn_t[c - 1];
+            float te = (x == nx - 1) ? tc : tIn_t[c + 1];
+            float tn = (y == 0) ? tc : tIn_t[c - nx];
+            float ts = (y == ny - 1) ? tc : tIn_t[c + nx];
+            float tb = (z == 0) ? tc : tIn_t[c - nx * ny];
+            float tt = (z == nz - 1) ? tc : tIn_t[c + nx * ny];
+            tOut_t[c] = cc * tc + cw * tw + ce * te + cs * ts + cn * tn +
+                        cb * tb + ct * tt + (dt / Cap) * pIn[c] + ct * amb_temp;
           }
         }
       }
@@ -163,7 +160,8 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
 
 void usage(int argc, char **argv) {
   fprintf(stderr,
-          "Usage: %s <rows/cols> <layers> <iterations> <nthreads> <powerFile> <tempFile> "
+          "Usage: %s <rows/cols> <layers> <iterations> <nthreads> <powerFile> "
+          "<tempFile> "
           "<outputFile>\n",
           argv[0]);
   fprintf(
