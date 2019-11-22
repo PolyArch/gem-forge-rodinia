@@ -44,7 +44,7 @@ template <typename T> T *alloc(int N) { return new T[N]; }
 template <typename T> void dealloc(T *array) { delete[] array; }
 
 template <typename T> void copy(T *dst, T *src, int N) {
-#pragma omp parallel for default(shared) schedule(static)
+#pragma omp parallel for firstprivate(dst, src, N) schedule(static)
   for (int i = 0; i < N; i++) {
     dst[i] = src[i];
   }
@@ -140,10 +140,11 @@ inline double compute_speed_of_sound(double &density, double &pressure) {
   return std::sqrt(double(GAMMA) * pressure / density);
 }
 
-void compute_step_factor(int nelr, double *variables, double *areas,
+void compute_step_factor(uint64_t nelr, double *variables, double *areas,
                          double *step_factors) {
-#pragma omp parallel for default(shared) schedule(static)
-  for (int i = 0; i < nelr; i++) {
+#pragma omp parallel for firstprivate(nelr, variables, areas, step_factors)    \
+    schedule(static)
+  for (uint64_t i = 0; i < nelr; i++) {
     double density = variables[NVAR * i + VAR_DENSITY];
 
     double3 momentum;
@@ -166,20 +167,16 @@ void compute_step_factor(int nelr, double *variables, double *areas,
   }
 }
 
-/*
- *
- *
- */
-
-void compute_flux(int nelr, int *elements_surrounding_elements, double *normals,
-                  double *variables, double *fluxes) {
+void compute_flux(uint64_t nelr, int *elements_surrounding_elements,
+                  double *normals, double *variables, double *fluxes) {
   const double smoothing_coefficient = double(0.2f);
 
-#pragma omp parallel for default(shared) schedule(static)
-  for (int i = 0; i < nelr; i++) {
-    int j, nb;
-    double3 normal;
-    double normal_len;
+#pragma omp parallel for firstprivate(                                         \
+    nelr, elements_surrounding_elements, normals, variables, fluxes,           \
+    smoothing_coefficient, ff_variable, ff_flux_contribution_momentum_x,       \
+    ff_flux_contribution_momentum_y, ff_flux_contribution_momentum_z,          \
+    ff_flux_contribution_density_energy) default(none) schedule(static)
+  for (uint64_t i = 0; i < nelr; i++) {
     double factor;
 
     double density_i = variables[NVAR * i + VAR_DENSITY];
@@ -220,13 +217,14 @@ void compute_flux(int nelr, int *elements_surrounding_elements, double *normals,
     double3 flux_contribution_nb_density_energy;
     double speed_sqd_nb, speed_of_sound_nb, pressure_nb;
 
-    for (j = 0; j < NNB; j++) {
-      nb = elements_surrounding_elements[i * NNB + j];
+    for (uint64_t j = 0; j < NNB; j++) {
+      int64_t nb = elements_surrounding_elements[i * NNB + j];
+      double3 normal;
       normal.x = normals[(i * NNB + j) * NDIM + 0];
       normal.y = normals[(i * NNB + j) * NDIM + 1];
       normal.z = normals[(i * NNB + j) * NDIM + 2];
-      normal_len = std::sqrt(normal.x * normal.x + normal.y * normal.y +
-                             normal.z * normal.z);
+      double normal_len = std::sqrt(normal.x * normal.x + normal.y * normal.y +
+                                    normal.z * normal.z);
 
       if (nb >= 0) // a legitimate neighbor
       {
@@ -349,10 +347,12 @@ void compute_flux(int nelr, int *elements_surrounding_elements, double *normals,
   }
 }
 
-void time_step(int j, int nelr, double *old_variables, double *variables,
-               double *step_factors, double *fluxes) {
-#pragma omp parallel for default(shared) schedule(static)
-  for (int i = 0; i < nelr; i++) {
+void time_step(uint64_t j, uint64_t nelr, double *old_variables,
+               double *variables, double *step_factors, double *fluxes) {
+#pragma omp parallel for firstprivate(j, nelr, old_variables, variables,       \
+                                      step_factors, fluxes) default(none)      \
+    schedule(static)
+  for (uint64_t i = 0; i < nelr; i++) {
     double factor = step_factors[i] / double(RK + 1 - j);
 
     variables[NVAR * i + VAR_DENSITY] = old_variables[NVAR * i + VAR_DENSITY] +
