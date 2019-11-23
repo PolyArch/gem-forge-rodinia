@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define GEM_FORGE
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
 #endif
@@ -63,10 +62,11 @@ void BFSGraph(int argc, char **argv) {
   bool *h_graph_mask = (bool *)malloc(sizeof(bool) * no_of_nodes);
   bool *h_updating_graph_mask = (bool *)malloc(sizeof(bool) * no_of_nodes);
   bool *h_graph_visited = (bool *)malloc(sizeof(bool) * no_of_nodes);
-  
+
   int start, edgeno;
   // initalize the memory
-  uint32_t *start_edge_no = (uint32_t *)malloc(sizeof(uint32_t) * no_of_nodes * 2);
+  uint32_t *start_edge_no =
+      (uint32_t *)malloc(sizeof(uint32_t) * no_of_nodes * 2);
   fread(start_edge_no, sizeof(start_edge_no[0]), no_of_nodes * 2, fp);
   for (unsigned int i = 0; i < no_of_nodes; i++) {
     h_graph_nodes[i].starting = start_edge_no[i * 2 + 0];
@@ -90,7 +90,8 @@ void BFSGraph(int argc, char **argv) {
   int id, cost;
   int *h_graph_edges = (int *)malloc(sizeof(int) * edge_list_size);
 
-  uint32_t *edge_cost = (uint32_t *)malloc(sizeof(uint32_t) * edge_list_size * 2);
+  uint32_t *edge_cost =
+      (uint32_t *)malloc(sizeof(uint32_t) * edge_list_size * 2);
   fread(edge_cost, sizeof(edge_cost[0]), edge_list_size * 2, fp);
   for (int i = 0; i < edge_list_size; i++) {
     id = edge_cost[i * 2 + 0];
@@ -130,25 +131,26 @@ void BFSGraph(int argc, char **argv) {
     m5_detail_sim_start();
 #endif
 
-    bool stop;
+    bool unfinished;
     do {
       // if no thread changes this value then the loop stops
-      stop = false;
+      unfinished = false;
 
 #ifdef OPEN
 #ifdef OMP_OFFLOAD
 #pragma omp target
 #endif
-#pragma omp parallel for
+#pragma omp parallel for firstprivate(                                         \
+    no_of_nodes, h_graph_mask, h_graph_nodes, h_graph_edges, h_graph_visited,  \
+    h_cost, h_updating_graph_mask)
 #endif
-      for (int tid = 0; tid < no_of_nodes; tid++) {
-        if (h_graph_mask[tid] == true) {
+      for (uint64_t tid = 0; tid < no_of_nodes; tid++) {
+        if (h_graph_mask[tid]) {
           h_graph_mask[tid] = false;
-          for (int i = h_graph_nodes[tid].starting;
-               i <
-               (h_graph_nodes[tid].no_of_edges + h_graph_nodes[tid].starting);
-               i++) {
-            int id = h_graph_edges[i];
+          uint64_t start = h_graph_nodes[tid].starting;
+          uint64_t end = h_graph_nodes[tid].no_of_edges + start;
+          for (uint64_t i = start; i < end; i++) {
+            uint64_t id = h_graph_edges[i];
             if (!h_graph_visited[id]) {
               h_cost[id] = h_cost[tid] + 1;
               h_updating_graph_mask[id] = true;
@@ -161,23 +163,25 @@ void BFSGraph(int argc, char **argv) {
 #ifdef OMP_OFFLOAD
 #pragma omp target map(stop)
 #endif
-#pragma omp parallel for
+#pragma omp parallel for firstprivate(no_of_nodes, h_updating_graph_mask,      \
+                                      h_graph_mask, h_graph_visited,           \
+                                      h_updating_graph_mask)
 #endif
-      for (int tid = 0; tid < no_of_nodes; tid++) {
-        if (h_updating_graph_mask[tid] == true) {
+      for (uint64_t tid = 0; tid < no_of_nodes; tid++) {
+        if (h_updating_graph_mask[tid]) {
           h_graph_mask[tid] = true;
           h_graph_visited[tid] = true;
-          stop = true;
+          unfinished = true;
           h_updating_graph_mask[tid] = false;
         }
       }
       k++;
-    } while (stop);
+    } while (unfinished);
 
 // ROI ends.
 #ifdef GEM_FORGE
     m5_detail_sim_end();
-    return;
+    exit(0);
 #endif
 
 #ifdef OPEN
