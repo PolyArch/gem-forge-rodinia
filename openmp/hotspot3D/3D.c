@@ -79,8 +79,8 @@ void computeTempCPU(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
   int x, y, z;
   int i = 0;
   do {
-    for (z = 0; z < nz; z++)
-      for (y = 0; y < ny; y++)
+    for (z = 0; z < nz; z++) {
+      for (y = 0; y < ny; y++) {
         for (x = 0; x < nx; x++) {
           c = x + y * nx + z * nx * ny;
 
@@ -95,6 +95,8 @@ void computeTempCPU(float *pIn, float *tIn, float *tOut, int nx, int ny, int nz,
                     tIn[w] * cw + tIn[t] * ct + tIn[b] * cb +
                     (dt / Cap) * pIn[c] + ct * amb_temp;
         }
+      }
+    }
     float *temp = tIn;
     tIn = tOut;
     tOut = temp;
@@ -148,10 +150,12 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, uint64_t nx,
                         cb * tb + ct * tt + (dt / Cap) * pIn[c] + ct * amb_temp;
           }
         }
+        printf("Done iter z = %lu.\n", z);
       }
       float *t = tIn_t;
       tIn_t = tOut_t;
       tOut_t = t;
+      printf("Done iter count = %d.\n", count);
       count++;
     } while (count < numiter);
   }
