@@ -7,10 +7,10 @@ all: bfs.exe
 
 riscv: raw.riscv.exe
 
-hotspot_openmp.bc: hotspot_openmp.cpp
+hotspot.bc: hotspot.cpp
 	$(CC) $(CC_FLAGS) $^ -emit-llvm -c -o $@
 
-raw.bc: hotspot_openmp.bc
+raw.bc: hotspot.bc
 	llvm-link $^ -o $@
 	opt -instnamer $@ -o $@
 

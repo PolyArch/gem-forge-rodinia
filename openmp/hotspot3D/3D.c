@@ -132,6 +132,11 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, uint64_t nx,
     float *tOut_t = tOut;
 
     do {
+
+#ifdef GEM_FORGE
+      m5_work_begin(0, 0);
+#endif
+
 #pragma omp parallel for schedule(static)                                      \
     firstprivate(tIn_t, pIn, tOut_t, ce, cw, cn, cs, ct, cb, cc, nx, ny, nz,   \
                  amb_temp, dt, Cap)
@@ -150,12 +155,13 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, uint64_t nx,
                         cb * tb + ct * tt + (dt / Cap) * pIn[c] + ct * amb_temp;
           }
         }
-        printf("Done iter z = %lu.\n", z);
       }
+#ifdef GEM_FORGE
+      m5_work_end(0, 0);
+#endif
       float *t = tIn_t;
       tIn_t = tOut_t;
       tOut_t = t;
-      printf("Done iter count = %d.\n", count);
       count++;
     } while (count < numiter);
   }
@@ -242,6 +248,19 @@ int main(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+  for (uint64_t z = 0; z < layers; z++) {
+    for (uint64_t y = 0; y < numRows; y++) {
+      for (uint64_t x = 0; x < numCols; x += 64 / sizeof(float)) {
+        uint64_t c = x + y * numCols + z * numCols * numRows;
+        volatile float v1 = powerIn[c];
+        volatile float v2 = tempIn[c];
+        volatile float v3 = tempOut[c];
+      }
+    }
+  }
+  m5_reset_stats(0, 0);
+#endif
 #endif
   computeTempOMP(powerIn, tempIn, tempOut, numCols, numRows, layers, Cap, Rx,
                  Ry, Rz, dt, iterations);

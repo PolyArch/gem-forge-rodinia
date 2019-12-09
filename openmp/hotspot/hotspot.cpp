@@ -55,18 +55,54 @@ int num_omp_threads;
 void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
                       int col, FLOAT Cap_1, FLOAT Rx_1, FLOAT Ry_1, FLOAT Rz_1,
                       FLOAT step) {
+#ifdef BLOCKED
   uint64_t num_chunk = row * col / (BLOCK_SIZE_R * BLOCK_SIZE_C);
   uint64_t chunks_in_row = col / BLOCK_SIZE_C;
   uint64_t chunks_in_col = row / BLOCK_SIZE_R;
-
-#ifdef OPEN
-#ifndef __MIC__
-  omp_set_num_threads(num_omp_threads);
 #endif
+
+#ifdef GEM_FORGE
+  m5_work_begin(0, 0);
+#endif
+
+#ifndef BLOCKED
+#pragma omp parallel for shared(power, temp, result)                           \
+    firstprivate(row, col, Cap_1, Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
+  for (uint64_t r = 0; r < row; ++r) {
+    for (uint64_t c = 0; c < col; ++c) {
+      uint64_t idx = r * col + c;
+      uint64_t idxE = idx + 1;
+      uint64_t idxW = idx - 1;
+      uint64_t idxS = idx + col;
+      uint64_t idxN = idx - col;
+      FLOAT powerC = power[idx];
+      FLOAT tempC = temp[idx];
+      FLOAT tempN = tempC;
+      FLOAT tempS = tempC;
+      FLOAT tempE = tempC;
+      FLOAT tempW = tempC;
+      if (r < row - 1) {
+        tempS = temp[idx + col];
+      }
+      if (r > 0) {
+        tempN = temp[idx - col];
+      }
+      if (c < col - 1) {
+        tempE = temp[idx + 1];
+      }
+      if (c > 0) {
+        tempW = temp[idx - 1];
+      }
+      FLOAT delta = Cap_1 * (powerC + (tempS + tempN - 2.f * tempC) * Ry_1 +
+                             (tempE + tempW - 2.f * tempC) * Rx_1 +
+                             (amb_temp - tempC) * Rz_1);
+      result[idx] = tempC + delta;
+    }
+  }
+#else
 #pragma omp parallel for shared(power, temp, result)                           \
     firstprivate(row, col, num_chunk, chunks_in_row, chunks_in_col, Cap_1,     \
                  Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
-#endif
   for (uint64_t chunk = 0; chunk < num_chunk; ++chunk) {
     uint64_t r_start = BLOCK_SIZE_R * (chunk / chunks_in_col);
     uint64_t c_start = BLOCK_SIZE_C * (chunk % chunks_in_row);
@@ -105,6 +141,11 @@ void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
       }
     }
   }
+#endif
+
+#ifdef GEM_FORGE
+  m5_work_end(0, 0);
+#endif
 }
 
 #ifdef OMP_OFFLOAD
@@ -142,6 +183,21 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
   fprintf(stdout, "Rx: %g\tRy: %g\tRz: %g\tCap: %g\n", Rx, Ry, Rz, Cap);
 #endif
 
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+  for (int i = 0; i < row; ++i) {
+    for (int j = 0; j < col; j += 64 / sizeof(FLOAT)) {
+      int idx = i * row + j;
+      volatile FLOAT vr = result[idx];
+      volatile FLOAT vt = temp[idx];
+      volatile FLOAT vp = power[idx];
+    }
+  }
+  m5_reset_stats(0, 0);
+#endif
+#endif
+
 #ifdef OMP_OFFLOAD
   int array_size = row * col;
 #pragma omp target map(temp [0:array_size])                                    \
@@ -164,6 +220,11 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
   }
 #ifdef VERBOSE
   fprintf(stdout, "iteration %d\n", i++);
+#endif
+
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
 #endif
 }
 
@@ -262,14 +323,9 @@ int main(int argc, char **argv) {
 
   long long start_time = get_time();
 
-#ifdef GEM_FORGE
-  m5_detail_sim_start();
-#endif
+  omp_set_num_threads(num_omp_threads);
+
   compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);
-#ifdef GEM_FORGE
-  m5_detail_sim_end();
-  exit(0);
-#endif
 
   long long end_time = get_time();
 

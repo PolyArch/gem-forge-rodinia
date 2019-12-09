@@ -83,6 +83,11 @@ __attribute__((noinline)) void pathfinder(int *src, int *dst) {
     int *temp = src;
     src = dst;
     dst = temp;
+
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
+#endif
+
 #pragma omp parallel for firstprivate(cols, t) schedule(static)
     for (int64_t n = 0; n < cols; n++) {
       int min = src[n];
@@ -92,6 +97,9 @@ __attribute__((noinline)) void pathfinder(int *src, int *dst) {
         min = MIN(min, src[n + 1]);
       dst[n] = wall[t + 1][n] + min;
     }
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+#endif
   }
 }
 
@@ -115,7 +123,25 @@ void run(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
+
+/**
+ * In Ruby, cache is disabled in fast forward mode.
+ * However, this program only run once, so we manually
+ * warm up the cache by iterating through the wall array
+ * and reset stats after that.
+ * Of course this will make the simulation time longer.
+ */
+#ifdef GEM_FORGE_WARM_CACHE
+  for (int t = 0; t < rows; ++t) {
+    for (int n = 0; n < cols; n += (64 / sizeof(wall[0][0]))) {
+      volatile int v = wall[t][n];
+    }
+  }
 #endif
+  m5_reset_stats(0, 0);
+
+#endif
+
   pathfinder(src, dst);
 #ifdef GEM_FORGE
   m5_detail_sim_end();
