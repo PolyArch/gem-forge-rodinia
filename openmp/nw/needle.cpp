@@ -103,9 +103,13 @@ void nw_optimized(int *input_itemsets, int *output_itemsets, int *referrence,
             uint64_t idxN = idx - max_cols;
             uint64_t idxW = idx - 1;
 
-            input_itemsets[idx] = maximum(
-                input_itemsets[idxNW] + referrence[idx],
-                input_itemsets[idxW] - penalty, input_itemsets[idxN] - penalty);
+            int inputNW = input_itemsets[idxNW];
+            int ref = referrence[idx];
+            int inputW = input_itemsets[idxW];
+            int inputN = input_itemsets[idxN];
+
+            input_itemsets[idx] =
+                maximum(inputNW + ref, inputW - penalty, inputN - penalty);
           }
         }
       }
@@ -141,9 +145,13 @@ void nw_optimized(int *input_itemsets, int *output_itemsets, int *referrence,
             uint64_t idxN = idx - max_cols;
             uint64_t idxW = idx - 1;
 
-            input_itemsets[idx] = maximum(
-                input_itemsets[idxNW] + referrence[idx],
-                input_itemsets[idxW] - penalty, input_itemsets[idxN] - penalty);
+            int inputNW = input_itemsets[idxNW];
+            int ref = referrence[idx];
+            int inputW = input_itemsets[idxW];
+            int inputN = input_itemsets[idxN];
+
+            input_itemsets[idx] =
+                maximum(inputNW + ref, inputW - penalty, inputN - penalty);
           }
         }
 
@@ -276,14 +284,45 @@ void runTest(int argc, char **argv) {
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
-  for (uint64_t i = 0; i < max_rows; ++i) {
-    for (uint64_t j = 0; j < max_cols; j += 64 / sizeof(int)) {
-      uint64_t idx = i * max_cols + j;
-      volatile int vi = input_itemsets[idx];
-      volatile int vo = output_itemsets[idx];
-      volatile int vr = referrence[idx];
+  // for (uint64_t i = 0; i < max_rows; ++i) {
+  //   for (uint64_t j = 0; j < max_cols; j += 64 / sizeof(int)) {
+  //     uint64_t idx = i * max_cols + j;
+  //     volatile int vi = input_itemsets[idx];
+  //     volatile int vo = output_itemsets[idx];
+  //     volatile int vr = referrence[idx];
+  //   }
+  // }
+  for (uint64_t blk = 1; blk <= (max_cols - 1) / BLOCK_SIZE; blk++) {
+#pragma omp parallel for schedule(static) shared(input_itemsets, referrence)   \
+    firstprivate(blk, max_rows, max_cols)
+      for (uint64_t b_index_x = 0; b_index_x < blk; ++b_index_x) {
+        uint64_t b_index_y = blk - 1 - b_index_x;
+        for (uint64_t i = 1; i < BLOCK_SIZE + 1; ++i) {
+          for (uint64_t j = 1; j < BLOCK_SIZE + 1; ++j) {
+            uint64_t idx = (i + b_index_y * BLOCK_SIZE) * max_cols +
+                           b_index_x * BLOCK_SIZE + j;
+            volatile int input = input_itemsets[idx];
+            volatile int ref = referrence[idx];
+          }
+        }
+      }
     }
-  }
+    for (uint64_t blk = 2; blk <= (max_cols - 1) / BLOCK_SIZE; blk++) {
+#pragma omp parallel for schedule(static) shared(input_itemsets, referrence)   \
+    firstprivate(blk, max_rows, max_cols)
+      for (uint64_t b_index_x = blk - 1;
+           b_index_x < (max_cols - 1) / BLOCK_SIZE; ++b_index_x) {
+        uint64_t b_index_y = (max_cols - 1) / BLOCK_SIZE + blk - 2 - b_index_x;
+        for (uint64_t i = 1; i < BLOCK_SIZE + 1; ++i) {
+          for (uint64_t j = 1; j < BLOCK_SIZE + 1; ++j) {
+            uint64_t idx = (i + b_index_y * BLOCK_SIZE) * max_cols +
+                           b_index_x * BLOCK_SIZE + j;
+            volatile int input = input_itemsets[idx];
+            volatile int ref = referrence[idx];
+          }
+        }
+      }
+    }
   m5_reset_stats(0, 0);
 #endif
 #endif
