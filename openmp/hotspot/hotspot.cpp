@@ -68,7 +68,11 @@ void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
 #ifndef BLOCKED
 #pragma omp parallel for shared(power, temp, result)                           \
     firstprivate(row, col, Cap_1, Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
-  for (uint64_t r = 0; r < row; ++r) {
+  for (uint64_t r = 1; r < row - 1; ++r) {
+    /**
+     * ! This will access one element outside the array, but I keep it so that
+     * ! the inner-most loop is perfectly vectorizable.
+     */
     for (uint64_t c = 0; c < col; ++c) {
       uint64_t idx = r * col + c;
       uint64_t idxE = idx + 1;
@@ -77,22 +81,10 @@ void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
       uint64_t idxN = idx - col;
       FLOAT powerC = power[idx];
       FLOAT tempC = temp[idx];
-      FLOAT tempN = tempC;
-      FLOAT tempS = tempC;
-      FLOAT tempE = tempC;
-      FLOAT tempW = tempC;
-      if (r < row - 1) {
-        tempS = temp[idx + col];
-      }
-      if (r > 0) {
-        tempN = temp[idx - col];
-      }
-      if (c < col - 1) {
-        tempE = temp[idx + 1];
-      }
-      if (c > 0) {
-        tempW = temp[idx - 1];
-      }
+      FLOAT tempS = temp[idx + col];
+      FLOAT tempN = temp[idx - col];
+      FLOAT tempE = temp[idx + 1];
+      FLOAT tempW = temp[idx - 1];
       FLOAT delta = Cap_1 * (powerC + (tempS + tempN - 2.f * tempC) * Ry_1 +
                              (tempE + tempW - 2.f * tempC) * Rx_1 +
                              (amb_temp - tempC) * Rz_1);
@@ -186,9 +178,19 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
-  for (int i = 0; i < row; ++i) {
-    for (int j = 0; j < col; j += 64 / sizeof(FLOAT)) {
-      int idx = i * row + j;
+  // for (int i = 0; i < row; ++i) {
+  //   for (int j = 0; j < col; j += 64 / sizeof(FLOAT)) {
+  //     int idx = i * row + j;
+  //     volatile FLOAT vr = result[idx];
+  //     volatile FLOAT vt = temp[idx];
+  //     volatile FLOAT vp = power[idx];
+  //   }
+  // }
+#pragma omp parallel for shared(power, temp, result) firstprivate(row, col)    \
+    schedule(static)
+  for (uint64_t r = 0; r < row; ++r) {
+    for (uint64_t c = 0; c < col; c += 64 / sizeof(FLOAT)) {
+      int idx = r * row + c;
       volatile FLOAT vr = result[idx];
       volatile FLOAT vt = temp[idx];
       volatile FLOAT vp = power[idx];

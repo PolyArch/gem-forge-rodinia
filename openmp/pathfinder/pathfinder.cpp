@@ -24,7 +24,7 @@ void run(int argc, char **argv);
 int64_t rows, cols;
 int num_threads;
 int *data;
-int **wall;
+int *wall;
 int *result;
 #define M_SEED 9
 
@@ -37,11 +37,8 @@ void init(int argc, char **argv) {
     printf("Usage: pathfiner width num_of_steps num_of_threads\n");
     exit(0);
   }
-  data = new int[rows * cols];
-  wall = new int *[rows];
-  for (int n = 0; n < rows; n++)
-    wall[n] = data + cols * n;
-  result = new int[cols];
+  wall = new int[rows * cols];
+  result = new int[cols + 2];
 
   int seed = M_SEED;
   srand(seed);
@@ -50,16 +47,16 @@ void init(int argc, char **argv) {
   // No need to initialize as it's data independent.
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j++) {
-      wall[i][j] = rand() % 10;
+      wall[i * cols + j] = rand() % 10;
     }
   }
   for (int j = 0; j < cols; j++)
-    result[j] = wall[0][j];
+    result[j + 1] = wall[0 * cols + j];
 #endif
 #ifdef BENCH_PRINT
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j++) {
-      printf("%d ", wall[i][j]);
+      printf("%d ", wall[i * cols + j]);
     }
     printf("\n");
   }
@@ -90,13 +87,15 @@ __attribute__((noinline)) void pathfinder(int *src, int *dst) {
 
 #pragma omp parallel for firstprivate(cols, t) schedule(static)
     for (int64_t n = 0; n < cols; n++) {
-      int min = src[n];
-      if (n > 0)
-        min = MIN(min, src[n - 1]);
-      if (n < cols - 1)
-        min = MIN(min, src[n + 1]);
-      dst[n] = wall[t + 1][n] + min;
+      int min = MIN(src[n], MIN(src[n + 1], src[n + 2]));
+      int w = wall[t * cols + n];
+      dst[n + 1] = w + min;
     }
+
+    // Expand the boundary values.
+    dst[0] = dst[1];
+    dst[cols + 1] = dst[cols];
+
 #ifdef GEM_FORGE
     m5_work_end(0, 0);
 #endif
@@ -112,7 +111,7 @@ void run(int argc, char **argv) {
   int min;
 
   dst = result;
-  src = new int[cols];
+  src = new int[cols + 2];
 
   pin_stats_reset();
 
@@ -133,8 +132,11 @@ void run(int argc, char **argv) {
  */
 #ifdef GEM_FORGE_WARM_CACHE
   for (int t = 0; t < rows; ++t) {
-    for (int n = 0; n < cols; n += (64 / sizeof(wall[0][0]))) {
-      volatile int v = wall[t][n];
+#pragma omp parallel for firstprivate(t, cols, wall, src, dst) schedule(static)
+    for (int n = 0; n < cols; n += (64 / sizeof(int))) {
+      volatile int v = wall[t * cols + n];
+      volatile int vs = src[n];
+      volatile int vd = dst[n];
     }
   }
 #endif

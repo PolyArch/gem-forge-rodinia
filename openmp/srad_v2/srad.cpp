@@ -3,8 +3,6 @@
 
 //#define OUTPUT
 
-#define OPEN
-#define ITERATION
 #include <math.h>
 #include <omp.h>
 #include <stdio.h>
@@ -37,15 +35,10 @@ void usage(int argc, char **argv) {
 }
 
 int main(int argc, char *argv[]) {
-  int rows, cols, size_I, size_R, niter = 10, iter, k;
-  float *I, *J, q0sqr, sum, sum2, tmp, meanROI, varROI;
-  float G2, L, num, den, qsqr;
-  float *dN, *dS, *dW, *dE;
+  uint64_t rows, cols;
+  int niter = 10;
   int r1, r2, c1, c2;
-  float cN, cS, cW, cE;
-  float *c, D;
   float lambda;
-  int i, j;
   int nthreads;
 
   if (argc == 10) {
@@ -66,133 +59,177 @@ int main(int argc, char *argv[]) {
     usage(argc, argv);
   }
 
-  size_I = cols * rows;
-  size_R = (r2 - r1 + 1) * (c2 - c1 + 1);
+  uint64_t size_I = cols * rows;
+  uint64_t size_R = (r2 - r1 + 1) * (c2 - c1 + 1);
 
-  I = (float *)malloc(size_I * sizeof(float));
-  J = (float *)malloc(size_I * sizeof(float));
-  c = (float *)malloc(size_I * sizeof(float));
+  float *I = (float *)malloc(size_I * sizeof(float));
+  float *J = (float *)malloc(size_I * sizeof(float));
+  float *c = (float *)malloc(size_I * sizeof(float));
 
-  dN = (float *)malloc(sizeof(float) * size_I);
-  dS = (float *)malloc(sizeof(float) * size_I);
-  dW = (float *)malloc(sizeof(float) * size_I);
-  dE = (float *)malloc(sizeof(float) * size_I);
+  /**
+   * Store the intermediate results.
+   * dN, dS, dW, dE.
+   */
+  float *delta = (float *)malloc(sizeof(float) * size_I * 4);
+  float *deltaN = (float *)malloc(sizeof(float) * size_I);
+  float *deltaS = (float *)malloc(sizeof(float) * size_I);
+  float *deltaE = (float *)malloc(sizeof(float) * size_I);
+  float *deltaW = (float *)malloc(sizeof(float) * size_I);
 
   printf("Randomizing the input matrix\n");
 
   random_matrix(I, rows, cols);
 
-  for (k = 0; k < size_I; k++) {
+  for (int k = 0; k < size_I; k++) {
     J[k] = (float)exp(I[k]);
   }
 
   printf("Start the SRAD main loop\n");
+  omp_set_num_threads(nthreads);
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #endif
 
-#ifdef ITERATION
-  for (iter = 0; iter < niter; iter++) {
-#endif
-    sum = 0;
-    sum2 = 0;
-    for (i = r1; i <= r2; i++) {
-      for (j = c1; j <= c2; j++) {
-        tmp = J[i * cols + j];
+  for (int iter = 0; iter < niter; iter++) {
+    float sum = 0;
+    float sum2 = 0;
+    for (int i = r1; i <= r2; i++) {
+      for (int j = c1; j <= c2; j++) {
+        float tmp = J[i * cols + j];
         sum += tmp;
         sum2 += tmp * tmp;
       }
     }
-    meanROI = sum / size_R;
-    varROI = (sum2 / size_R) - meanROI * meanROI;
-    q0sqr = varROI / (meanROI * meanROI);
+    float meanROI = sum / size_R;
+    float varROI = (sum2 / size_R) - meanROI * meanROI;
+    float q0sqr = varROI / (meanROI * meanROI);
 
-#ifdef OPEN
-    omp_set_num_threads(nthreads);
-#pragma omp parallel for shared(J, dN, dS, dW, dE, c, rows, cols, iN, iS, jW,  \
-                                jE) private(i, j, k, Jc, G2, L, num, den,      \
-                                            qsqr)
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
 #endif
-    for (int i = 0; i < rows; i++) {
-      for (int j = 0; j < cols; j++) {
 
-        k = i * cols + j;
-        float Jc = J[k];
+#pragma omp parallel for firstprivate(rows, cols) schedule(static)
+    for (uint64_t i = 1; i < rows - 1; i++) {
+#pragma clang loop vectorize(enable)
+      for (uint64_t j = 0; j < cols; j++) {
+
+        /**
+         * ! Avoid i+1.
+         * Please avoid have the expression i + 1 in the loop body,
+         * as it will break our stream pass to analyze the pattern
+         * of i.
+         */
+
+        /**
+         * ! Accessing j - 1 and j + 1.
+         * This will access out of array bound, but keeps the loop trip count
+         * a multiple of vectorize width.
+         * We cound also do this with padding.
+         */
 
         // directional derivates
         float dNValue = 0.0f;
         float dSValue = 0.0f;
         float dWValue = 0.0f;
         float dEValue = 0.0f;
-        if (i > 0) {
-          dNValue = J[(i - 1) * cols + j] - Jc;
-        }
-        if (i + 1 < rows) {
-          dSValue = J[(i + 1) * cols + j] - Jc;
-        }
-        if (j > 0) {
-          dWValue = J[k - 1] - Jc;
-        }
-        if (j + 1 < cols) {
-          dEValue = J[k + 1] - Jc;
-        }
+        uint64_t k = i * cols + j;
+        float Jc = J[k];
+        dWValue = J[k - 1] - Jc;
+        dEValue = J[k + 1] - Jc;
+        dNValue = J[k - cols] - Jc;
+        dSValue = J[k + cols] - Jc;
+        // if (j > 0) {
+        //   dWValue = J[k - 1] - Jc;
+        // }
+        // if (j < cols - 1) {
+        //   dEValue = J[k + 1] - Jc;
+        // }
+        // if (i > 0) {
+        //   dNValue = J[k - cols] - Jc;
+        // }
+        // if (i < rows - 1) {
+        //   dSValue = J[k + cols] - Jc;
+        // }
 
-        G2 = (dNValue * dNValue + dSValue * dSValue + dWValue * dWValue +
-              dEValue * dEValue) /
-             (Jc * Jc);
+        float G2 = (dNValue * dNValue + dSValue * dSValue + dWValue * dWValue +
+                    dEValue * dEValue) /
+                   (Jc * Jc);
 
-        L = (dNValue + dSValue + dWValue + dEValue) / Jc;
+        float L = (dNValue + dSValue + dWValue + dEValue) / Jc;
 
-        num = (0.5 * G2) - ((1.0 / 16.0) * (L * L));
-        den = 1 + (.25 * L);
-        qsqr = num / (den * den);
+        float num = (0.5 * G2) - ((1.0 / 16.0) * (L * L));
+        float den = 1 + (.25 * L);
+        float qsqr = num / (den * den);
 
         // diffusion coefficent (equ 33)
         den = (qsqr - q0sqr) / (q0sqr * (1 + q0sqr));
-        c[k] = 1.0 / (1.0 + den);
-
+        float cValue = 1.0 / (1.0 + den);
         // saturate diffusion coefficent
-        if (c[k] < 0) {
-          c[k] = 0;
-        } else if (c[k] > 1) {
-          c[k] = 1;
-        }
+        cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
+        c[k] = cValue;
 
-        dN[k] = dNValue;
-        dS[k] = dSValue;
-        dW[k] = dWValue;
-        dE[k] = dEValue;
+        // uint64_t dk = i * cols * 4 + j * 4;
+        // delta[dk + 0] = dNValue;
+        // delta[dk + 1] = dSValue;
+        // delta[dk + 2] = dWValue;
+        // delta[dk + 3] = dEValue;
+        deltaN[k] = dNValue;
+        deltaS[k] = dSValue;
+        deltaW[k] = dWValue;
+        deltaE[k] = dEValue;
       }
     }
-#ifdef OPEN
-    omp_set_num_threads(nthreads);
-#pragma omp parallel for shared(J, c, rows, cols,                              \
-                                lambda) private(i, j, k, D, cS, cN, cW, cE)
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+    m5_work_begin(1, 0);
 #endif
-    for (int i = 0; i < rows; i++) {
-      for (int j = 0; j < cols; j++) {
+
+#pragma omp parallel for firstprivate(rows, cols, lambda) schedule(static)
+    for (uint64_t i = 0; i < rows - 1; i++) {
+      for (uint64_t j = 0; j < cols; j++) {
+        /**
+         * ! Accessing j + 1.
+         * Out of bound.
+         */
 
         // current index
-        k = i * cols + j;
+        uint64_t k = i * cols + j;
 
         // diffusion coefficent
-        cN = c[k];
-        cS = c[iS[i] * cols + j];
-        cW = c[k];
-        cE = c[i * cols + jE[j]];
+        float cN = c[k];
+        // float cS = cN;
+        // if (i < rows - 1) {
+        //   cS = c[k + cols];
+        // }
+        float cS = c[k + cols];
+        float cW = cN;
+        // float cE = cW;
+        // if (j < cols - 1) {
+        //   cE = c[k + 1];
+        // }
+        float cE = c[k + 1];
 
         // divergence (equ 58)
-        D = cN * dN[k] + cS * dS[k] + cW * dW[k] + cE * dE[k];
+        // uint64_t dk = i * cols * 4 + j * 4;
+        // float dNValue = delta[dk + 0];
+        // float dSValue = delta[dk + 1];
+        // float dWValue = delta[dk + 2];
+        // float dEValue = delta[dk + 3];
+        float dNValue = deltaN[k];
+        float dSValue = deltaS[k];
+        float dWValue = deltaW[k];
+        float dEValue = deltaE[k];
+        float D = cN * dNValue + cS * dSValue + cW * dWValue + cE * dEValue;
 
         // image update (equ 61)
         J[k] = J[k] + 0.25 * lambda * D;
       }
     }
-
-#ifdef ITERATION
-  }
+#ifdef GEM_FORGE
+    m5_work_end(1, 0);
 #endif
+  }
 
 #ifdef GEM_FORGE
   m5_detail_sim_end();
@@ -213,10 +250,11 @@ int main(int argc, char *argv[]) {
 
   free(I);
   free(J);
-  free(dN);
-  free(dS);
-  free(dW);
-  free(dE);
+  free(delta);
+  free(deltaN);
+  free(deltaS);
+  free(deltaE);
+  free(deltaW);
 
   free(c);
   return 0;

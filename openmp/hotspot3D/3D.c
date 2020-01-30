@@ -140,19 +140,30 @@ void computeTempOMP(float *pIn, float *tIn, float *tOut, uint64_t nx,
 #pragma omp parallel for schedule(static)                                      \
     firstprivate(tIn_t, pIn, tOut_t, ce, cw, cn, cs, ct, cb, cc, nx, ny, nz,   \
                  amb_temp, dt, Cap)
-      for (uint64_t z = 0; z < nz; z++) {
-        for (uint64_t y = 0; y < ny; y++) {
+      for (uint64_t z = 1; z < nz - 1; z++) {
+        for (uint64_t y = 1; y < ny - 1; y++) {
+          /**
+           * ! This will access one element out of the array,
+           * ! but we leave it there to have perfect vectorization.
+           */
           for (uint64_t x = 0; x < nx; x++) {
             uint64_t c = x + y * nx + z * nx * ny;
+            float p = pIn[c];
             float tc = tIn_t[c];
-            float tw = (x == 0) ? tc : tIn_t[c - 1];
-            float te = (x == nx - 1) ? tc : tIn_t[c + 1];
-            float tn = (y == 0) ? tc : tIn_t[c - nx];
-            float ts = (y == ny - 1) ? tc : tIn_t[c + nx];
-            float tb = (z == 0) ? tc : tIn_t[c - nx * ny];
-            float tt = (z == nz - 1) ? tc : tIn_t[c + nx * ny];
+            // float tw = (x == 0) ? tc : tIn_t[c - 1];
+            // float te = (x == nx - 1) ? tc : tIn_t[c + 1];
+            // float tn = (y == 0) ? tc : tIn_t[c - nx];
+            // float ts = (y == ny - 1) ? tc : tIn_t[c + nx];
+            // float tb = (z == 0) ? tc : tIn_t[c - nx * ny];
+            // float tt = (z == nz - 1) ? tc : tIn_t[c + nx * ny];
+            float tw = tIn_t[c - 1];
+            float te = tIn_t[c + 1];
+            float tn = tIn_t[c - nx];
+            float ts = tIn_t[c + nx];
+            float tb = tIn_t[c - nx * ny];
+            float tt = tIn_t[c + nx * ny];
             tOut_t[c] = cc * tc + cw * tw + ce * te + cs * ts + cn * tn +
-                        cb * tb + ct * tt + (dt / Cap) * pIn[c] + ct * amb_temp;
+                        cb * tb + ct * tt + (dt / Cap) * p + ct * amb_temp;
           }
         }
       }
@@ -249,6 +260,8 @@ int main(int argc, char **argv) {
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
+#pragma omp parallel for schedule(static)                                      \
+    firstprivate(powerIn, tempIn, tempOut, layers, numRows, numCols)
   for (uint64_t z = 0; z < layers; z++) {
     for (uint64_t y = 0; y < numRows; y++) {
       for (uint64_t x = 0; x < numCols; x += 64 / sizeof(float)) {
