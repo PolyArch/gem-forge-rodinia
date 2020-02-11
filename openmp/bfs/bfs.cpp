@@ -8,72 +8,108 @@
 #include "gem5/m5ops.h"
 #endif
 
-//#define NUM_THREAD 4
-#define OPEN
-
-FILE *fp;
-
 // Structure to hold a node information
 struct Node {
   int starting;
   int no_of_edges;
 };
 
-void BFSGraph(int argc, char **argv);
-
 void Usage(int argc, char **argv) {
-
   fprintf(stderr, "Usage: %s <num_threads> <input_file>\n", argv[0]);
 }
-////////////////////////////////////////////////////////////////////////////////
-// Main Program
-////////////////////////////////////////////////////////////////////////////////
-int main(int argc, char **argv) { BFSGraph(argc, argv); }
 
-////////////////////////////////////////////////////////////////////////////////
-// Apply BFS on a Graph using CUDA
-////////////////////////////////////////////////////////////////////////////////
-void BFSGraph(int argc, char **argv) {
-  int no_of_nodes = 0;
-  int edge_list_size = 0;
-  char *input_f;
-  int num_omp_threads;
+void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
+         bool *masks, bool *updates, bool *visits) {
+
+  int k = 0;
+  bool unfinished;
+  do {
+    // if no thread changes this value then the loop stops
+    unfinished = false;
+
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
+#endif
+
+#pragma omp parallel for firstprivate(nNodes, masks, nodes, edges, visits,     \
+                                      costs, updates) schedule(static)
+    for (uint64_t tid = 0; tid < nNodes; tid++) {
+      bool mask = masks[tid];
+      masks[tid] = !mask;
+      if (mask) {
+        uint64_t start = nodes[tid].starting;
+        uint64_t end = nodes[tid].no_of_edges + start;
+        for (uint64_t i = start; i < end; i++) {
+          uint64_t id = edges[i];
+          if (!visits[id]) {
+            costs[id] = costs[tid] + 1;
+            updates[id] = true;
+          }
+        }
+      }
+    }
+
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+    m5_work_begin(1, 0);
+#endif
+
+#pragma omp parallel for firstprivate(nNodes, masks, visits, updates)
+    for (uint64_t tid = 0; tid < nNodes; tid++) {
+      bool update = updates[tid];
+      updates[tid] = !update;
+      if (update) {
+        masks[tid] = true;
+        visits[tid] = true;
+        unfinished = true;
+        updates[tid] = false;
+      }
+    }
+
+#ifdef GEM_FORGE
+    m5_work_end(1, 0);
+#endif
+    k++;
+  } while (unfinished);
+}
+
+int main(int argc, char **argv) {
 
   if (argc != 3) {
     Usage(argc, argv);
     exit(0);
   }
 
-  num_omp_threads = atoi(argv[1]);
-  input_f = argv[2];
+  int num_omp_threads = atoi(argv[1]);
+  char *input_f = argv[2];
 
   printf("Reading File\n");
   // Read in Graph from a file
-  fp = fopen(input_f, "rb");
+  FILE *fp = fopen(input_f, "rb");
   if (!fp) {
     printf("Error Reading graph file\n");
-    return;
+    return 1;
   }
 
-  fread(&no_of_nodes, sizeof(no_of_nodes), 1, fp);
+  int nNodes = 0;
+  fread(&nNodes, sizeof(nNodes), 1, fp);
 
   // allocate host memory
-  Node *h_graph_nodes = (Node *)malloc(sizeof(Node) * no_of_nodes);
-  bool *h_graph_mask = (bool *)malloc(sizeof(bool) * no_of_nodes);
-  bool *h_updating_graph_mask = (bool *)malloc(sizeof(bool) * no_of_nodes);
-  bool *h_graph_visited = (bool *)malloc(sizeof(bool) * no_of_nodes);
+  Node *nodes = (Node *)malloc(sizeof(Node) * nNodes);
+  bool *masks = (bool *)malloc(sizeof(bool) * nNodes);
+  bool *updates = (bool *)malloc(sizeof(bool) * nNodes);
+  bool *visits = (bool *)malloc(sizeof(bool) * nNodes);
 
   int start, edgeno;
   // initalize the memory
-  uint32_t *start_edge_no =
-      (uint32_t *)malloc(sizeof(uint32_t) * no_of_nodes * 2);
-  fread(start_edge_no, sizeof(start_edge_no[0]), no_of_nodes * 2, fp);
-  for (unsigned int i = 0; i < no_of_nodes; i++) {
-    h_graph_nodes[i].starting = start_edge_no[i * 2 + 0];
-    h_graph_nodes[i].no_of_edges = start_edge_no[i * 2 + 1];
-    h_graph_mask[i] = false;
-    h_updating_graph_mask[i] = false;
-    h_graph_visited[i] = false;
+  uint32_t *start_edge_no = (uint32_t *)malloc(sizeof(uint32_t) * nNodes * 2);
+  fread(start_edge_no, sizeof(start_edge_no[0]), nNodes * 2, fp);
+  for (unsigned int i = 0; i < nNodes; i++) {
+    nodes[i].starting = start_edge_no[i * 2 + 0];
+    nodes[i].no_of_edges = start_edge_no[i * 2 + 1];
+    masks[i] = false;
+    updates[i] = false;
+    visits[i] = false;
   }
   free(start_edge_no);
 
@@ -82,127 +118,91 @@ void BFSGraph(int argc, char **argv) {
   fread(&source, sizeof(source), 1, fp);
 
   // set the source node as true in the mask
-  h_graph_mask[source] = true;
-  h_graph_visited[source] = true;
+  masks[source] = true;
+  visits[source] = true;
 
-  fread(&edge_list_size, sizeof(edge_list_size), 1, fp);
+  int nEdges = 0;
+  fread(&nEdges, sizeof(nEdges), 1, fp);
 
   int id, cost;
-  int *h_graph_edges = (int *)malloc(sizeof(int) * edge_list_size);
+  int *edges = (int *)malloc(sizeof(int) * nEdges);
 
-  uint32_t *edge_cost =
-      (uint32_t *)malloc(sizeof(uint32_t) * edge_list_size * 2);
-  fread(edge_cost, sizeof(edge_cost[0]), edge_list_size * 2, fp);
-  for (int i = 0; i < edge_list_size; i++) {
+  uint32_t *edge_cost = (uint32_t *)malloc(sizeof(uint32_t) * nEdges * 2);
+  fread(edge_cost, sizeof(edge_cost[0]), nEdges * 2, fp);
+  for (int i = 0; i < nEdges; i++) {
     id = edge_cost[i * 2 + 0];
-    h_graph_edges[i] = id;
+    edges[i] = id;
   }
   free(edge_cost);
 
-  if (fp)
-    fclose(fp);
+  fclose(fp);
 
   // allocate mem for the result on host side
-  int *h_cost = (int *)malloc(sizeof(int) * no_of_nodes);
-  for (int i = 0; i < no_of_nodes; i++)
-    h_cost[i] = -1;
-  h_cost[source] = 0;
+  int *costs = (int *)malloc(sizeof(int) * nNodes);
+  for (int i = 0; i < nNodes; i++)
+    costs[i] = -1;
+  costs[source] = 0;
 
-  printf("Start traversing the tree.\n");
-
-  int k = 0;
-#ifdef OPEN
-  double start_time = omp_get_wtime();
-  omp_set_dynamic(0);
   omp_set_num_threads(num_omp_threads);
-#ifdef OMP_OFFLOAD
-#pragma omp target data map(                                                   \
-    to                                                                         \
-    : no_of_nodes, h_graph_mask [0:no_of_nodes],                               \
-      h_graph_nodes [0:no_of_nodes], h_graph_edges [0:edge_list_size],         \
-      h_graph_visited [0:no_of_nodes], h_updating_graph_mask [0:no_of_nodes])  \
-    map(h_cost [0:no_of_nodes])
-  {
-#endif
-#endif
 
 // ROI Begins.
 #ifdef GEM_FORGE
-    m5_detail_sim_start();
+  m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+  // 3 masks: visited, mask, updateing.
+  size_t mask_size = nNodes * sizeof(masks[0]) * 3;
+  size_t node_size = nNodes * sizeof(nodes[0]);
+  size_t cost_size = nNodes * sizeof(costs[0]);
+  size_t edge_size = nEdges * sizeof(edges[0]);
+  printf(
+      "Masks %lu kB, nodes %lu kB, cost %lu kB, edge %lu kB, total %lu MB.\n",
+      mask_size / 1024, node_size / 1024, cost_size / 1024, edge_size / 1024,
+      (mask_size + node_size + cost_size + edge_size) / 1024 / 1024);
+#pragma omp parallel for firstprivate(nNodes, masks, visits, updates)          \
+    schedule(static)
+  for (uint64_t tid = 0; tid < nNodes; tid += 64 / sizeof(bool)) {
+    volatile bool mask = masks[tid];
+    volatile bool visit = visits[tid];
+    volatile bool update = updates[tid];
+  }
+#pragma omp parallel for firstprivate(nNodes, nodes) schedule(static)
+  for (uint64_t tid = 0; tid < nNodes; tid += 64 / sizeof(Node)) {
+    volatile Node node = nodes[tid];
+  }
+#pragma omp parallel for firstprivate(nNodes, costs) schedule(static)
+  for (uint64_t tid = 0; tid < nNodes; tid += 64 / sizeof(int)) {
+    volatile int cost = costs[tid];
+  }
+#pragma omp parallel for firstprivate(nEdges, edges) schedule(static)
+  for (uint64_t eid = 0; eid < nEdges; eid += 64 / sizeof(int)) {
+    volatile int edge = edges[eid];
+  }
+  m5_reset_stats(0, 0);
+#endif
 #endif
 
-    bool unfinished;
-    do {
-      // if no thread changes this value then the loop stops
-      unfinished = false;
-
-#ifdef OPEN
-#ifdef OMP_OFFLOAD
-#pragma omp target
-#endif
-#pragma omp parallel for firstprivate(                                         \
-    no_of_nodes, h_graph_mask, h_graph_nodes, h_graph_edges, h_graph_visited,  \
-    h_cost, h_updating_graph_mask)
-#endif
-      for (uint64_t tid = 0; tid < no_of_nodes; tid++) {
-        if (h_graph_mask[tid]) {
-          h_graph_mask[tid] = false;
-          uint64_t start = h_graph_nodes[tid].starting;
-          uint64_t end = h_graph_nodes[tid].no_of_edges + start;
-          for (uint64_t i = start; i < end; i++) {
-            uint64_t id = h_graph_edges[i];
-            if (!h_graph_visited[id]) {
-              h_cost[id] = h_cost[tid] + 1;
-              h_updating_graph_mask[id] = true;
-            }
-          }
-        }
-      }
-
-#ifdef OPEN
-#ifdef OMP_OFFLOAD
-#pragma omp target map(stop)
-#endif
-#pragma omp parallel for firstprivate(no_of_nodes, h_updating_graph_mask,      \
-                                      h_graph_mask, h_graph_visited,           \
-                                      h_updating_graph_mask)
-#endif
-      for (uint64_t tid = 0; tid < no_of_nodes; tid++) {
-        if (h_updating_graph_mask[tid]) {
-          h_graph_mask[tid] = true;
-          h_graph_visited[tid] = true;
-          unfinished = true;
-          h_updating_graph_mask[tid] = false;
-        }
-      }
-      k++;
-    } while (unfinished);
+  bfs(nNodes, nEdges, nodes, edges, costs, masks, updates, visits);
 
 // ROI ends.
 #ifdef GEM_FORGE
-    m5_detail_sim_end();
-    exit(0);
+  m5_detail_sim_end();
+  exit(0);
 #endif
 
-#ifdef OPEN
-    double end_time = omp_get_wtime();
-    printf("Compute time: %lf\n", (end_time - start_time));
-#ifdef OMP_OFFLOAD
-  }
-#endif
-#endif
   // Store the result into a file
   FILE *fpo = fopen("result.txt", "w");
-  for (int i = 0; i < no_of_nodes; i++)
-    fprintf(fpo, "%d) cost:%d\n", i, h_cost[i]);
+  for (int i = 0; i < nNodes; i++)
+    fprintf(fpo, "%d) cost:%d\n", i, costs[i]);
   fclose(fpo);
   printf("Result stored in result.txt\n");
 
   // cleanup memory
-  free(h_graph_nodes);
-  free(h_graph_edges);
-  free(h_graph_mask);
-  free(h_updating_graph_mask);
-  free(h_graph_visited);
-  free(h_cost);
+  free(nodes);
+  free(edges);
+  free(masks);
+  free(updates);
+  free(visits);
+  free(costs);
+
+  return 0;
 }
