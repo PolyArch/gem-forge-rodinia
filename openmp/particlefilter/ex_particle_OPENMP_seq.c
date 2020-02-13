@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <math.h>
 #include <omp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,25 +30,12 @@ int A = 1103515245;
 @var C value for LCG
 */
 int C = 12345;
-/*****************************
- *GET_TIME
- *returns a long int representing the time
- *****************************/
-long long get_time() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return (tv.tv_sec * 1000000) + tv.tv_usec;
-}
-// Returns the number of seconds elapsed between the two specified times
-float elapsed_time(long long start_time, long long end_time) {
-  return (float)(end_time - start_time) / (1000 * 1000);
-}
 /**
  * Takes in a double and returns an integer that approximates to that double
  * @return if the mantissa < .5 => return value < input value; else return value
  * > input value
  */
-double roundDouble(double value) {
+int roundDouble(double value) {
   int newValue = (int)(value);
   if (value - newValue < .5)
     return newValue;
@@ -351,6 +339,257 @@ int findIndexBin(double *CDF, int beginIndex, int endIndex, double value) {
     return findIndexBin(CDF, beginIndex, middleIndex + 1, value);
   return findIndexBin(CDF, middleIndex - 1, endIndex, value);
 }
+
+typedef struct {
+  uint64_t Nparticles;
+  int max_size;
+  int IszX;
+  int IszY;
+  int Nfr;
+  int *I;
+  uint64_t countOnes;
+  double *objxy;
+  int *ind;
+  double *likelihood;
+  double *weights;
+  double *CDF;
+  int *seed;
+  double *arrayX;
+  double *arrayY;
+  double *xj;
+  double *yj;
+  double *u;
+  int k;
+} KernelArgs;
+
+#define ExtractArgs(t, v) t v = args.v;
+
+/**
+ * Kernel 1: Apply motion model.
+ */
+__attribute__((noinline)) void applyMotionModel(KernelArgs args) {
+  ExtractArgs(double *, arrayX);
+  ExtractArgs(double *, arrayY);
+  ExtractArgs(uint64_t, Nparticles);
+  ExtractArgs(int *, seed);
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
+#endif
+// apply motion model
+// draws sample from motion model (random walk). The only prior information
+// is that the object moves 2x as fast as in the y direction
+#pragma omp parallel for firstprivate(arrayX, arrayY, Nparticles, seed)        \
+    schedule(static)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    arrayX[x] += 1 + 5 * randn(seed, x);
+    arrayY[x] += -2 + 2 * randn(seed, x);
+  }
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+#endif
+
+  printf("1 applyMotionModel done.\n");
+}
+
+/**
+ * Kernel 2: Compute likelihood.
+ * Indirect access to compute the likelihood of particles.
+ */
+__attribute__((noinline)) void computeLikelihood(KernelArgs args) {
+  ExtractArgs(double *, arrayX);
+  ExtractArgs(double *, arrayY);
+  ExtractArgs(double *, objxy);
+  ExtractArgs(double *, likelihood);
+  ExtractArgs(uint64_t, Nparticles);
+  ExtractArgs(int, countOnes);
+  ExtractArgs(int, max_size);
+  ExtractArgs(int, IszX);
+  ExtractArgs(int, IszY);
+  ExtractArgs(int, Nfr);
+  ExtractArgs(int, k);
+  ExtractArgs(int *, seed);
+  ExtractArgs(int *, I);
+  ExtractArgs(int *, ind);
+#ifdef GEM_FORGE
+    m5_work_begin(1, 0);
+#endif
+#pragma omp parallel for firstprivate(Nparticles, countOnes, max_size, IszX,   \
+                                      IszY, Nfr, k, likelihood, I, arrayX,     \
+                                      arrayY, objxy, ind) schedule(static)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    // compute the likelihood: remember our assumption is that you know
+    // foreground and the background image intensity distribution.
+    // Notice that we consider here a likelihood ratio, instead of
+    // p(z|x). It is possible in this case. why? a hometask for you.
+    // calc ind
+
+    /**
+     * Unroll this will generate a load of <4xdouble>, which breaks
+     * the backend as we don't know how to split a StreamLoad.
+     * TODO: Remove this after we have a transformation to split a load of
+     * <4xdouble>
+     * TODO: 2 load of <2xdouble>.
+     */
+    int xValue = roundDouble(arrayX[x]);
+    int yValue = roundDouble(arrayY[x]);
+#pragma clang loop vectorize(disable)
+    for (uint64_t y = 0; y < countOnes; y++) {
+      int indX = xValue + objxy[y * 2 + 1];
+      int indY = yValue + objxy[y * 2];
+      int indValue = abs(indX * IszY * Nfr + indY * Nfr + k);
+      if (indValue >= max_size) {
+        indValue = 0;
+      }
+      uint64_t pos = x * countOnes + y;
+      ind[pos] = indValue;
+    }
+    double likelihoodValue = 0.0;
+    for (uint64_t y = 0; y < countOnes; y++) {
+      int IValue = I[ind[x * countOnes + y]];
+      likelihoodValue +=
+          (pow((IValue - 100), 2) - pow((IValue - 228), 2)) / 50.0;
+    }
+    likelihood[x] = likelihoodValue / ((double)countOnes);
+  }
+#ifdef GEM_FORGE
+    m5_work_end(1, 0);
+#endif
+  printf("2 computeLikelihood done.\n");
+}
+
+__attribute__((noinline)) void updateWeight(KernelArgs args) {
+  ExtractArgs(uint64_t, Nparticles);
+  ExtractArgs(double *, likelihood);
+  ExtractArgs(double *, weights);
+  double sumWeights = 0;
+#ifdef GEM_FORGE
+    m5_work_begin(2, 0);
+#endif
+#pragma omp parallel for firstprivate(Nparticles, weights, likelihood) reduction(+ : sumWeights)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    double weight = weights[x];
+    weight *= exp(likelihood[x]);
+    sumWeights += weight;
+    weights[x] = weight;
+  }
+#ifdef GEM_FORGE
+    m5_work_end(2, 0);
+#endif
+#ifdef GEM_FORGE
+    m5_work_begin(3, 0);
+#endif
+#pragma omp parallel for firstprivate(Nparticles, weights, sumWeights)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    double weight = weights[x];
+    weights[x] = weight / sumWeights;
+  }
+#ifdef GEM_FORGE
+    m5_work_end(3, 0);
+#endif
+
+  printf("3 updateWeight done.\n");
+}
+
+__attribute((noinline)) void averageParticles(KernelArgs args) {
+  ExtractArgs(double *, arrayX);
+  ExtractArgs(double *, arrayY);
+  ExtractArgs(uint64_t, Nparticles);
+  ExtractArgs(double *, weights);
+  ExtractArgs(int, IszX);
+  ExtractArgs(int, IszY);
+  double xe = 0;
+  double ye = 0;
+// estimate the object location by expected values
+#ifdef GEM_FORGE
+    m5_work_begin(4, 0);
+#endif
+#pragma omp parallel for firstprivate(Nparticles, arrayX, arrayY, weights) reduction(+ : xe, ye)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    xe += arrayX[x] * weights[x];
+    ye += arrayY[x] * weights[x];
+  }
+#ifdef GEM_FORGE
+    m5_work_end(4, 0);
+#endif
+  double distance = sqrt(pow((double)(xe - (int)roundDouble(IszY / 2.0)), 2) +
+                         pow((double)(ye - (int)roundDouble(IszX / 2.0)), 2));
+  printf("4 averageParticles done (%lf, %lf), %lf\n", xe, ye, distance);
+}
+
+__attribute__((noinline)) void resampleParticles(KernelArgs args) {
+  ExtractArgs(uint64_t, Nparticles);
+  ExtractArgs(double *, weights);
+  ExtractArgs(double *, CDF);
+  ExtractArgs(double *, arrayX);
+  ExtractArgs(double *, arrayY);
+  ExtractArgs(double *, xj);
+  ExtractArgs(double *, yj);
+  ExtractArgs(double *, u);
+  ExtractArgs(int *, seed);
+
+#ifdef GEM_FORGE
+    m5_work_begin(5, 0);
+#endif
+  CDF[0] = weights[0];
+  for (uint64_t x = 1; x < Nparticles; x++) {
+    CDF[x] = weights[x] + CDF[x - 1];
+  }
+#ifdef GEM_FORGE
+    m5_work_end(5, 0);
+#endif
+
+  printf("5 computeCDF done.\n");
+
+#ifdef GEM_FORGE
+    m5_work_begin(6, 0);
+#endif
+  double u1 = (1 / ((double)(Nparticles))) * randu(seed, 0);
+#pragma omp parallel for firstprivate(u, u1, Nparticles) schedule(static)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    u[x] = u1 + x / ((double)(Nparticles));
+  }
+#ifdef GEM_FORGE
+    m5_work_end(6, 0);
+#endif
+
+  printf("6 computeU done.\n");
+
+#ifdef GEM_FORGE
+    m5_work_begin(7, 0);
+#endif
+#pragma omp parallel for firstprivate(CDF, Nparticles, xj, yj, u, arrayX,      \
+                                      arrayY)
+  for (uint64_t j = 0; j < Nparticles; j++) {
+    int i = findIndex(CDF, Nparticles, u[j]);
+    if (i == -1)
+      i = Nparticles - 1;
+    xj[j] = arrayX[i];
+    yj[j] = arrayY[i];
+  }
+#ifdef GEM_FORGE
+    m5_work_end(7, 0);
+#endif
+
+  printf("7 resample done.\n");
+
+#ifdef GEM_FORGE
+    m5_work_begin(8, 0);
+#endif
+#pragma omp parallel for firstprivate(weights, Nparticles, arrayX, arrayY, xj, \
+                                      yj)
+  for (uint64_t x = 0; x < Nparticles; x++) {
+    // reassign arrayX and arrayY
+    arrayX[x] = xj[x];
+    arrayY[x] = yj[x];
+    weights[x] = 1 / ((double)(Nparticles));
+  }
+#ifdef GEM_FORGE
+    m5_work_end(8, 0);
+#endif
+
+  printf("8 reset done.\n");
+}
+
 /**
  * The implementation of the particle filter using OpenMP for many frames
  * @see http://openmp.org/wp/
@@ -369,7 +608,6 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
                     int Nparticles, int Nthreads) {
 
   int max_size = IszX * IszY * Nfr;
-  long long start = get_time();
   // original particle centroid
   double xe = roundDouble(IszY / 2.0);
   double ye = roundDouble(IszX / 2.0);
@@ -390,18 +628,12 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
   double *objxy = (double *)malloc(countOnes * 2 * sizeof(double));
   getneighbors(disk, countOnes, objxy, radius);
 
-  long long get_neighbors = get_time();
-  printf("TIME TO GET NEIGHBORS TOOK: %f\n",
-         elapsed_time(start, get_neighbors));
   // initial weights are all equal (1/Nparticles)
   double *weights = (double *)malloc(sizeof(double) * Nparticles);
 #pragma omp parallel for shared(weights, Nparticles) private(x)
   for (x = 0; x < Nparticles; x++) {
     weights[x] = 1 / ((double)(Nparticles));
   }
-  long long get_weights = get_time();
-  printf("TIME TO GET WEIGHTSTOOK: %f\n",
-         elapsed_time(get_neighbors, get_weights));
   // initial likelihood to 0.0
   double *likelihood = (double *)malloc(sizeof(double) * Nparticles);
   double *arrayX = (double *)malloc(sizeof(double) * Nparticles);
@@ -416,138 +648,41 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
     arrayX[x] = xe;
     arrayY[x] = ye;
   }
-  int k;
 
-  printf("TIME TO SET ARRAYS TOOK: %f\n",
-         elapsed_time(get_weights, get_time()));
-  int indX, indY;
+  // Prepare the arguments to the kernel.
+  KernelArgs args;
+  args.Nparticles = Nparticles;
+  args.max_size = max_size;
+  args.IszX = IszX;
+  args.IszY = IszY;
+  args.Nfr = Nfr;
+  args.I = I;
+  args.countOnes = countOnes;
+  args.objxy = objxy;
+  args.ind = ind;
+  args.likelihood = likelihood;
+  args.weights = weights;
+  args.CDF = CDF;
+  args.seed = seed;
+  args.arrayX = arrayX;
+  args.arrayY = arrayY;
+  args.xj = xj;
+  args.yj = yj;
+  args.u = u;
+
 #ifdef GEM_FORGE
   omp_set_dynamic(0);
   omp_set_num_threads(Nthreads);
   omp_set_schedule(omp_sched_static, 0);
   m5_detail_sim_start();
 #endif
-  for (k = 1; k < Nfr; k++) {
-    long long set_arrays = get_time();
-// apply motion model
-// draws sample from motion model (random walk). The only prior information
-// is that the object moves 2x as fast as in the y direction
-#pragma omp parallel for shared(arrayX, arrayY, Nparticles, seed) private(x)
-    for (x = 0; x < Nparticles; x++) {
-      arrayX[x] += 1 + 5 * randn(seed, x);
-      arrayY[x] += -2 + 2 * randn(seed, x);
-    }
-    long long error = get_time();
-    printf("TIME TO SET ERROR TOOK: %f\n", elapsed_time(set_arrays, error));
-// particle filter likelihood
-#pragma omp parallel for shared(likelihood, I, arrayX, arrayY, objxy,          \
-                                ind) private(x, y, indX, indY)
-    for (x = 0; x < Nparticles; x++) {
-      // compute the likelihood: remember our assumption is that you know
-      // foreground and the background image intensity distribution.
-      // Notice that we consider here a likelihood ratio, instead of
-      // p(z|x). It is possible in this case. why? a hometask for you.
-      // calc ind
-      for (y = 0; y < countOnes; y++) {
-        indX = roundDouble(arrayX[x]) + objxy[y * 2 + 1];
-        indY = roundDouble(arrayY[x]) + objxy[y * 2];
-        ind[x * countOnes + y] = abs(indX * IszY * Nfr + indY * Nfr + k);
-        if (ind[x * countOnes + y] >= max_size)
-          ind[x * countOnes + y] = 0;
-      }
-      likelihood[x] = 0;
-      for (y = 0; y < countOnes; y++)
-        likelihood[x] += (pow((I[ind[x * countOnes + y]] - 100), 2) -
-                          pow((I[ind[x * countOnes + y]] - 228), 2)) /
-                         50.0;
-      likelihood[x] = likelihood[x] / ((double)countOnes);
-    }
-    long long likelihood_time = get_time();
-    printf("TIME TO GET LIKELIHOODS TOOK: %f\n",
-           elapsed_time(error, likelihood_time));
-// update & normalize weights
-// using equation (63) of Arulampalam Tutorial
-#pragma omp parallel for shared(Nparticles, weights, likelihood) private(x)
-    for (x = 0; x < Nparticles; x++) {
-      weights[x] = weights[x] * exp(likelihood[x]);
-    }
-    long long exponential = get_time();
-    printf("TIME TO GET EXP TOOK: %f\n",
-           elapsed_time(likelihood_time, exponential));
-    double sumWeights = 0;
-#pragma omp parallel for private(x) reduction(+ : sumWeights)
-    for (x = 0; x < Nparticles; x++) {
-      sumWeights += weights[x];
-    }
-    long long sum_time = get_time();
-    printf("TIME TO SUM WEIGHTS TOOK: %f\n",
-           elapsed_time(exponential, sum_time));
-#pragma omp parallel for shared(sumWeights, weights) private(x)
-    for (x = 0; x < Nparticles; x++) {
-      weights[x] = weights[x] / sumWeights;
-    }
-    long long normalize = get_time();
-    printf("TIME TO NORMALIZE WEIGHTS TOOK: %f\n",
-           elapsed_time(sum_time, normalize));
-    xe = 0;
-    ye = 0;
-// estimate the object location by expected values
-#pragma omp parallel for private(x) reduction(+ : xe, ye)
-    for (x = 0; x < Nparticles; x++) {
-      xe += arrayX[x] * weights[x];
-      ye += arrayY[x] * weights[x];
-    }
-    long long move_time = get_time();
-    printf("TIME TO MOVE OBJECT TOOK: %f\n",
-           elapsed_time(normalize, move_time));
-    printf("XE: %lf\n", xe);
-    printf("YE: %lf\n", ye);
-    double distance = sqrt(pow((double)(xe - (int)roundDouble(IszY / 2.0)), 2) +
-                           pow((double)(ye - (int)roundDouble(IszX / 2.0)), 2));
-    printf("%lf\n", distance);
-    // display(hold off for now)
-
-    // pause(hold off for now)
-
-    // resampling
-
-    CDF[0] = weights[0];
-    for (x = 1; x < Nparticles; x++) {
-      CDF[x] = weights[x] + CDF[x - 1];
-    }
-    long long cum_sum = get_time();
-    printf("TIME TO CALC CUM SUM TOOK: %f\n", elapsed_time(move_time, cum_sum));
-    double u1 = (1 / ((double)(Nparticles))) * randu(seed, 0);
-#pragma omp parallel for shared(u, u1, Nparticles) private(x)
-    for (x = 0; x < Nparticles; x++) {
-      u[x] = u1 + x / ((double)(Nparticles));
-    }
-    long long u_time = get_time();
-    printf("TIME TO CALC U TOOK: %f\n", elapsed_time(cum_sum, u_time));
-    int j, i;
-
-#pragma omp parallel for shared(CDF, Nparticles, xj, yj, u, arrayX,            \
-                                arrayY) private(i, j)
-    for (j = 0; j < Nparticles; j++) {
-      i = findIndex(CDF, Nparticles, u[j]);
-      if (i == -1)
-        i = Nparticles - 1;
-      xj[j] = arrayX[i];
-      yj[j] = arrayY[i];
-    }
-    long long xyj_time = get_time();
-    printf("TIME TO CALC NEW ARRAY X AND Y TOOK: %f\n",
-           elapsed_time(u_time, xyj_time));
-
-    //#pragma omp parallel for shared(weights, Nparticles) private(x)
-    for (x = 0; x < Nparticles; x++) {
-      // reassign arrayX and arrayY
-      arrayX[x] = xj[x];
-      arrayY[x] = yj[x];
-      weights[x] = 1 / ((double)(Nparticles));
-    }
-    long long reset = get_time();
-    printf("TIME TO RESET WEIGHTS TOOK: %f\n", elapsed_time(xyj_time, reset));
+  for (int k = 1; k < Nfr; k++) {
+    args.k = k;
+    applyMotionModel(args);
+    computeLikelihood(args);
+    updateWeight(args);
+    averageParticles(args);
+    resampleParticles(args);
   }
 
 #ifdef GEM_FORGE
@@ -632,21 +767,16 @@ int main(int argc, char *argv[]) {
   // establish seed
   int *seed = (int *)malloc(sizeof(int) * Nparticles);
   int i;
-  for (i = 0; i < Nparticles; i++)
-    seed[i] = time(0) * i;
+  for (i = 0; i < Nparticles; i++) {
+    // seed[i] = time(0) * i;
+    seed[i] = i;
+  }
   // malloc matrix
   int *I = (int *)malloc(sizeof(int) * IszX * IszY * Nfr);
-  long long start = get_time();
   // call video sequence
   videoSequence(I, IszX, IszY, Nfr, seed);
-  long long endVideoSequence = get_time();
-  printf("VIDEO SEQUENCE TOOK %f\n", elapsed_time(start, endVideoSequence));
   // call particle filter
   particleFilter(I, IszX, IszY, Nfr, seed, Nparticles, Nthreads);
-  long long endParticleFilter = get_time();
-  printf("PARTICLE FILTER TOOK %f\n",
-         elapsed_time(endVideoSequence, endParticleFilter));
-  printf("ENTIRE PROGRAM TOOK %f\n", elapsed_time(start, endParticleFilter));
 
   free(seed);
   free(I);

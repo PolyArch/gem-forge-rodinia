@@ -1,6 +1,9 @@
 # C compiler
 CC=clang
 
+# Disable slp vectorizer as it generates v4f64 which can't be handled by gem5.
+# CC_FLAGS = -fno-slp-vectorize -fno-vectorize -fno-unroll-loops
+
 include ../GemForge.Makefile.include
 
 all: bfs.exe
