@@ -11,7 +11,7 @@ bfs.exe: bfs.cpp
 	${CC} ${CC_FLAGS} bfs.cpp -o $@
 
 raw.bc: bfs.cpp
-	${CC} ${CC_FLAGS} $^ -emit-llvm -c -o $@
+	${CC} ${CC_FLAGS} -fno-unroll-loops $^ -emit-llvm -c -o $@
 	opt -instnamer $@ -o $@
 
 %.ll: %.bc

@@ -26,23 +26,26 @@ void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
   do {
     // if no thread changes this value then the loop stops
     unfinished = false;
+    printf("Begin k = %d.\n", k);
 
 #ifdef GEM_FORGE
     m5_work_begin(0, 0);
 #endif
 
 #pragma omp parallel for firstprivate(nNodes, masks, nodes, edges, visits,     \
-                                      costs, updates) schedule(static)
+                                      costs, updates, k) schedule(static)
     for (uint64_t tid = 0; tid < nNodes; tid++) {
       bool mask = masks[tid];
-      masks[tid] = !mask;
+      masks[tid] = false;
       if (mask) {
         uint64_t start = nodes[tid].starting;
         uint64_t end = nodes[tid].no_of_edges + start;
+#pragma clang loop vectorize(disable) unroll(disable)
         for (uint64_t i = start; i < end; i++) {
           uint64_t id = edges[i];
           if (!visits[id]) {
-            costs[id] = costs[tid] + 1;
+            // printf("Update k %d src %lu dst %lu.\n", k, tid, id);
+            costs[id] = k + 1;
             updates[id] = true;
           }
         }
@@ -54,15 +57,15 @@ void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
     m5_work_begin(1, 0);
 #endif
 
-#pragma omp parallel for firstprivate(nNodes, masks, visits, updates)
+#pragma omp parallel for firstprivate(nNodes, masks, visits, updates)          \
+    schedule(static)
     for (uint64_t tid = 0; tid < nNodes; tid++) {
       bool update = updates[tid];
-      updates[tid] = !update;
+      updates[tid] = false;
       if (update) {
         masks[tid] = true;
         visits[tid] = true;
         unfinished = true;
-        updates[tid] = false;
       }
     }
 
