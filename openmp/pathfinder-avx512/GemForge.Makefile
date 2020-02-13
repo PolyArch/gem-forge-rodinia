@@ -7,7 +7,7 @@ all: bfs.exe
 
 riscv: raw.riscv.exe
 
-%.bc: ../pathfinder/pathfinder.cpp
+%.bc: %.cpp
 	$(CC) $(CC_FLAGS) -march=knl $^ -emit-llvm -c -o $@
 
 raw.bc: pathfinder.bc
@@ -23,6 +23,6 @@ raw.bc: pathfinder.bc
 raw.riscv.exe: raw.bc
 	${CC} ${RISCV_CC_FLAGS} ${CC_FLAGS} $^ -c -o raw.riscv.o
 	${RISCV_GCC} raw.riscv.o ${RISCV_LD_FLAGS} -o $@
-
+	
 clean:
 	rm -f *.exe *.bc *.ll *.o result.txt
