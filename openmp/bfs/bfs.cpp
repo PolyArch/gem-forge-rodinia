@@ -25,7 +25,6 @@ void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
   bool unfinished;
   do {
     // if no thread changes this value then the loop stops
-    unfinished = false;
     printf("Begin k = %d.\n", k);
 
 #ifdef GEM_FORGE
@@ -57,15 +56,17 @@ void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
     m5_work_begin(1, 0);
 #endif
 
+    unfinished = false;
 #pragma omp parallel for firstprivate(nNodes, masks, visits, updates)          \
-    schedule(static)
+    schedule(static) reduction(||                                              \
+                               : unfinished)
     for (uint64_t tid = 0; tid < nNodes; tid++) {
       bool update = updates[tid];
+      unfinished = unfinished || update;
       updates[tid] = false;
       if (update) {
         masks[tid] = true;
         visits[tid] = true;
-        unfinished = true;
       }
     }
 
