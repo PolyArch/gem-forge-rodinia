@@ -273,6 +273,16 @@ int main(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+  for (int i = 0; i < size * sizeof(record); i += 64) {
+    volatile char c = ((char *)krecords)[i];
+  }
+  for (int i = 0; i < knodes_elem * sizeof(knode); i += 64) {
+    volatile char c = ((char *)knodes)[i];
+  }
+  printf("Warm up done.");
+  m5_reset_stats(0, 0);
+#endif
 #endif
   struct CommonOMPArgs args;
   args.nthreads = cores_arg;
