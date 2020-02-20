@@ -4,8 +4,8 @@ LINK_FLAGS = -lm
 
 all: btree
 
-btree: main.c kernel_cpu.c kernel_cpu_2.c timer.c num.c
-	$(CC) $(CC_FLAGS) $^ -o $@ $(LINK_FLAGS)
+btree: gem5_main.c impl.c kernel_query.c kernel_range.c timer.c num.c
+	$(CC) $(CC_FLAGS) -DDUMP_OUTPUT $^ -o $@ $(LINK_FLAGS)
 
 clean:
-	rm btree *.o *.out output.txt
+	rm btree *.o output.txt
