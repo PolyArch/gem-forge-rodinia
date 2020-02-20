@@ -9,12 +9,6 @@
 #endif
 
 // Returns the current system time in microseconds
-long long get_time() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return (tv.tv_sec * 1000000) + tv.tv_usec;
-}
-
 #define BLOCK_SIZE 16
 #define BLOCK_SIZE_C BLOCK_SIZE
 #define BLOCK_SIZE_R BLOCK_SIZE
@@ -32,16 +26,12 @@ long long get_time() {
 #define OPEN
 //#define NUM_THREAD 4
 
-typedef float FLOAT;
+typedef double FLOAT;
 
 /* chip parameters	*/
 const FLOAT t_chip = 0.0005;
 const FLOAT chip_height = 0.016;
 const FLOAT chip_width = 0.016;
-
-#ifdef OMP_OFFLOAD
-#pragma offload_attribute(push, target(mic))
-#endif
 
 /* ambient temperature, assuming no package at all	*/
 const FLOAT amb_temp = 80.0;
@@ -52,9 +42,9 @@ int num_omp_threads;
  * advances the solution of the discretized difference equations
  * by one time step
  */
-void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
-                      int col, FLOAT Cap_1, FLOAT Rx_1, FLOAT Ry_1, FLOAT Rz_1,
-                      FLOAT step) {
+void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
+                      FLOAT *__restrict__ power, int row, int col, FLOAT Cap_1,
+                      FLOAT Rx_1, FLOAT Ry_1, FLOAT Rz_1, FLOAT step) {
 #ifdef BLOCKED
   uint64_t num_chunk = row * col / (BLOCK_SIZE_R * BLOCK_SIZE_C);
   uint64_t chunks_in_row = col / BLOCK_SIZE_C;
@@ -73,18 +63,27 @@ void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
      * ! This will access one element outside the array, but I keep it so that
      * ! the inner-most loop is perfectly vectorizable.
      */
+#ifdef GEM_FORGE_FIX_INPUT
+#pragma omp simd
+    for (uint64_t c = 0; c < 1024; ++c) {
+      uint64_t idx = r * 1024 + c;
+      uint64_t idxS = idx + 1024;
+      uint64_t idxN = idx - 1024;
+#else
+#pragma omp simd
     for (uint64_t c = 0; c < col; ++c) {
       uint64_t idx = r * col + c;
-      uint64_t idxE = idx + 1;
-      uint64_t idxW = idx - 1;
       uint64_t idxS = idx + col;
       uint64_t idxN = idx - col;
+#endif
+      uint64_t idxE = idx + 1;
+      uint64_t idxW = idx - 1;
       FLOAT powerC = power[idx];
       FLOAT tempC = temp[idx];
-      FLOAT tempS = temp[idx + col];
-      FLOAT tempN = temp[idx - col];
-      FLOAT tempE = temp[idx + 1];
-      FLOAT tempW = temp[idx - 1];
+      FLOAT tempS = temp[idxS];
+      FLOAT tempN = temp[idxN];
+      FLOAT tempE = temp[idxE];
+      FLOAT tempW = temp[idxW];
       FLOAT delta = Cap_1 * (powerC + (tempS + tempN - 2.f * tempC) * Ry_1 +
                              (tempE + tempW - 2.f * tempC) * Rx_1 +
                              (amb_temp - tempC) * Rz_1);
@@ -140,20 +139,12 @@ void single_iteration(FLOAT *result, FLOAT *temp, FLOAT *power, int row,
 #endif
 }
 
-#ifdef OMP_OFFLOAD
-#pragma offload_attribute(pop)
-#endif
-
 /* Transient solver driver routine: simply converts the heat
  * transfer differential equations to difference equations
  * and solves the difference equations by iterating
  */
 void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
                        FLOAT *power, int row, int col) {
-#ifdef VERBOSE
-  int i = 0;
-#endif
-
   FLOAT grid_height = chip_height / row;
   FLOAT grid_width = chip_width / col;
 
@@ -169,28 +160,15 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
   FLOAT Ry_1 = 1.f / Ry;
   FLOAT Rz_1 = 1.f / Rz;
   FLOAT Cap_1 = step / Cap;
-#ifdef VERBOSE
-  fprintf(stdout, "total iterations: %d s\tstep size: %g s\n", num_iterations,
-          step);
-  fprintf(stdout, "Rx: %g\tRy: %g\tRz: %g\tCap: %g\n", Rx, Ry, Rz, Cap);
-#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
-  // for (int i = 0; i < row; ++i) {
-  //   for (int j = 0; j < col; j += 64 / sizeof(FLOAT)) {
-  //     int idx = i * row + j;
-  //     volatile FLOAT vr = result[idx];
-  //     volatile FLOAT vt = temp[idx];
-  //     volatile FLOAT vp = power[idx];
-  //   }
-  // }
 #pragma omp parallel for shared(power, temp, result) firstprivate(row, col)    \
     schedule(static)
   for (uint64_t r = 0; r < row; ++r) {
     for (uint64_t c = 0; c < col; c += 64 / sizeof(FLOAT)) {
-      int idx = r * row + c;
+      int idx = r * col + c;
       volatile FLOAT vr = result[idx];
       volatile FLOAT vt = temp[idx];
       volatile FLOAT vp = power[idx];
@@ -200,29 +178,14 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
 #endif
 #endif
 
-#ifdef OMP_OFFLOAD
-  int array_size = row * col;
-#pragma omp target map(temp [0:array_size])                                    \
-    map(to                                                                     \
-        : power [0:array_size], row, col, Cap_1, Rx_1, Ry_1, Rz_1, step,       \
-          num_iterations) map(result [0:array_size])
-#endif
-  {
-    FLOAT *r = result;
-    FLOAT *t = temp;
-    for (int i = 0; i < num_iterations; i++) {
-#ifdef VERBOSE
-      fprintf(stdout, "iteration %d\n", i++);
-#endif
-      single_iteration(r, t, power, row, col, Cap_1, Rx_1, Ry_1, Rz_1, step);
-      FLOAT *tmp = t;
-      t = r;
-      r = tmp;
-    }
+  FLOAT *r = result;
+  FLOAT *t = temp;
+  for (int i = 0; i < num_iterations; i++) {
+    single_iteration(r, t, power, row, col, Cap_1, Rx_1, Ry_1, Rz_1, step);
+    FLOAT *tmp = t;
+    t = r;
+    r = tmp;
   }
-#ifdef VERBOSE
-  fprintf(stdout, "iteration %d\n", i++);
-#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_end();
@@ -233,26 +196,6 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
 void fatal(char *s) {
   fprintf(stderr, "error: %s\n", s);
   exit(1);
-}
-
-void writeoutput(FLOAT *vect, int grid_rows, int grid_cols, char *file) {
-
-  int i, j, index = 0;
-  FILE *fp;
-  char str[STR_SIZE];
-
-  if ((fp = fopen(file, "w")) == 0)
-    printf("The file was not opened\n");
-
-  for (i = 0; i < grid_rows; i++)
-    for (j = 0; j < grid_cols; j++) {
-
-      sprintf(str, "%d\t%g\n", index, vect[i * grid_cols + j]);
-      fputs(str, fp);
-      index++;
-    }
-
-  fclose(fp);
 }
 
 void read_input(FLOAT *vect, int grid_rows, int grid_cols, char *file) {
@@ -318,38 +261,17 @@ int main(int argc, char **argv) {
   pfile = argv[6];
   ofile = argv[7];
 
-  read_input(temp, grid_rows, grid_cols, tfile);
-  read_input(power, grid_rows, grid_cols, pfile);
+  // read_input(temp, grid_rows, grid_cols, tfile);
+  // read_input(power, grid_rows, grid_cols, pfile);
 
   printf("Start computing the transient temperature\n");
-
-  long long start_time = get_time();
 
   omp_set_num_threads(num_omp_threads);
 
   compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);
-
-  long long end_time = get_time();
-
-  printf("Ending simulation\n");
-  printf("Total time: %.3f seconds\n",
-         ((float)(end_time - start_time)) / (1000 * 1000));
-
-  writeoutput((1 & sim_time) ? result : temp, grid_rows, grid_cols, ofile);
-
-  /* output results	*/
-#ifdef VERBOSE
-  fprintf(stdout, "Final Temperatures:\n");
-#endif
-
-#ifdef OUTPUT
-  for (i = 0; i < grid_rows * grid_cols; i++)
-    fprintf(stdout, "%d\t%g\n", i, temp[i]);
-#endif
   /* cleanup	*/
   free(temp);
   free(power);
 
   return 0;
 }
-/* vim: set ts=4 sw=4  sts=4 et si ai: */

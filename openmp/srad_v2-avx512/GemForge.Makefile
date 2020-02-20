@@ -1,5 +1,5 @@
 # C compiler
-CC=clang++
+CC=clang
 
 include ../GemForge.Makefile.include
 
@@ -7,10 +7,10 @@ all: bfs.exe
 
 riscv: raw.riscv.exe
 
-hotspot.bc: hotspot.cpp
+%.bc: %.cpp
 	$(CC) $(CC_FLAGS) -march=knl $^ -emit-llvm -c -o $@
 
-raw.bc: hotspot.bc
+raw.bc: srad.bc
 	llvm-link $^ -o $@
 	opt -instnamer $@ -o $@
 

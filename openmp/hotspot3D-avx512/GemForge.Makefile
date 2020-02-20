@@ -7,7 +7,7 @@ all: bfs.exe
 
 riscv: raw.riscv.exe
 
-3D.bc: ../hotspot3D/3D.c
+3D.bc: 3D.c
 	$(CC) $(CC_FLAGS) -march=knl $^ -emit-llvm -c -o $@
 
 raw.bc: 3D.bc

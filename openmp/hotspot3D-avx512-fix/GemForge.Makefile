@@ -1,5 +1,5 @@
 # C compiler
-CC=clang++
+CC=clang
 
 include ../GemForge.Makefile.include
 
@@ -7,10 +7,10 @@ all: bfs.exe
 
 riscv: raw.riscv.exe
 
-hotspot.bc: hotspot.cpp
-	$(CC) $(CC_FLAGS) -march=knl $^ -emit-llvm -c -o $@
+3D.bc: 3D.c
+	$(CC) $(CC_FLAGS) -march=knl -DGEM_FORGE_FIX_INPUT $^ -emit-llvm -c -o $@
 
-raw.bc: hotspot.bc
+raw.bc: 3D.bc
 	llvm-link $^ -o $@
 	opt -instnamer $@ -o $@
 

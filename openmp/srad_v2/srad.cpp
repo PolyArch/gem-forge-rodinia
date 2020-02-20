@@ -11,6 +11,9 @@
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
+#ifdef GEM_FORGE_FIX_INPUT
+#define GEM_FORGE_FIX_COLS 2048
+#endif
 #endif
 
 void random_matrix(float *I, int rows, int cols);
@@ -30,34 +33,26 @@ void usage(int argc, char **argv) {
   fprintf(stderr, "\t<no. of threads>  - no. of threads\n");
   fprintf(stderr, "\t<lambda>   - lambda (0,1)\n");
   fprintf(stderr, "\t<no. of iter>   - number of iterations\n");
-
   exit(1);
 }
 
 int main(int argc, char *argv[]) {
-  uint64_t rows, cols;
-  int niter = 10;
-  int r1, r2, c1, c2;
-  float lambda;
-  int nthreads;
-
-  if (argc == 10) {
-    rows = atoi(argv[1]); // number of rows in the domain
-    cols = atoi(argv[2]); // number of cols in the domain
-    if ((rows % 16 != 0) || (cols % 16 != 0)) {
-      fprintf(stderr, "rows and cols must be multiples of 16\n");
-      exit(1);
-    }
-    r1 = atoi(argv[3]);       // y1 position of the speckle
-    r2 = atoi(argv[4]);       // y2 position of the speckle
-    c1 = atoi(argv[5]);       // x1 position of the speckle
-    c2 = atoi(argv[6]);       // x2 position of the speckle
-    nthreads = atoi(argv[7]); // number of threads
-    lambda = atof(argv[8]);   // Lambda value
-    niter = atoi(argv[9]);    // number of iterations
-  } else {
+  if (argc != 10) {
     usage(argc, argv);
   }
+  uint64_t rows = atoi(argv[1]); // number of rows in the domain
+  uint64_t cols = atoi(argv[2]); // number of cols in the domain
+  if ((rows % 16 != 0) || (cols % 16 != 0)) {
+    fprintf(stderr, "rows and cols must be multiples of 16\n");
+    exit(1);
+  }
+  int r1 = atoi(argv[3]);       // y1 position of the speckle
+  int r2 = atoi(argv[4]);       // y2 position of the speckle
+  int c1 = atoi(argv[5]);       // x1 position of the speckle
+  int c2 = atoi(argv[6]);       // x2 position of the speckle
+  int nthreads = atoi(argv[7]); // number of threads
+  float lambda = atof(argv[8]); // Lambda value
+  int niter = atoi(argv[9]);    // number of iterations
 
   uint64_t size_I = cols * rows;
   uint64_t size_R = (r2 - r1 + 1) * (c2 - c1 + 1);
@@ -78,19 +73,33 @@ int main(int argc, char *argv[]) {
 
   printf("Randomizing the input matrix\n");
 
-  random_matrix(I, rows, cols);
+  // random_matrix(I, rows, cols);
 
-  for (int k = 0; k < size_I; k++) {
-    J[k] = (float)exp(I[k]);
-  }
+  // for (int k = 0; k < size_I; k++) {
+  //   J[k] = (float)exp(I[k]);
+  // }
 
   printf("Start the SRAD main loop\n");
   omp_set_num_threads(nthreads);
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+#pragma omp parallel for firstprivate(rows, cols) schedule(static)
+  for (uint64_t i = 0; i < rows; ++i) {
+    for (uint64_t j = 0; j < cols; j += 64 / sizeof(float)) {
+      int idx = i * cols + j;
+      volatile float vj = J[idx];
+      volatile float vc = c[idx];
+      volatile float vdeltaN = deltaN[idx];
+      volatile float vdeltaS = deltaS[idx];
+      volatile float vdeltaW = deltaW[idx];
+      volatile float vdeltaE = deltaE[idx];
+    }
+  }
+  m5_reset_stats(0, 0);
 #endif
-
+#endif
   for (int iter = 0; iter < niter; iter++) {
     float sum = 0;
     float sum2 = 0;
@@ -111,8 +120,18 @@ int main(int argc, char *argv[]) {
 
 #pragma omp parallel for firstprivate(rows, cols) schedule(static)
     for (uint64_t i = 1; i < rows - 1; i++) {
-#pragma clang loop vectorize(enable)
+#pragma omp simd
+#ifdef GEM_FORGE_FIX_INPUT
+      for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
+        uint64_t k = i * GEM_FORGE_FIX_COLS + j;
+        uint64_t kN = k - GEM_FORGE_FIX_COLS;
+        uint64_t kS = k + GEM_FORGE_FIX_COLS;
+#else
       for (uint64_t j = 0; j < cols; j++) {
+        uint64_t k = i * cols + j;
+        uint64_t kN = k - cols;
+        uint64_t kS = k + cols;
+#endif
 
         /**
          * ! Avoid i+1.
@@ -129,28 +148,11 @@ int main(int argc, char *argv[]) {
          */
 
         // directional derivates
-        float dNValue = 0.0f;
-        float dSValue = 0.0f;
-        float dWValue = 0.0f;
-        float dEValue = 0.0f;
-        uint64_t k = i * cols + j;
         float Jc = J[k];
-        dWValue = J[k - 1] - Jc;
-        dEValue = J[k + 1] - Jc;
-        dNValue = J[k - cols] - Jc;
-        dSValue = J[k + cols] - Jc;
-        // if (j > 0) {
-        //   dWValue = J[k - 1] - Jc;
-        // }
-        // if (j < cols - 1) {
-        //   dEValue = J[k + 1] - Jc;
-        // }
-        // if (i > 0) {
-        //   dNValue = J[k - cols] - Jc;
-        // }
-        // if (i < rows - 1) {
-        //   dSValue = J[k + cols] - Jc;
-        // }
+        float dWValue = J[k - 1] - Jc;
+        float dEValue = J[k + 1] - Jc;
+        float dNValue = J[kN] - Jc;
+        float dSValue = J[kS] - Jc;
 
         float G2 = (dNValue * dNValue + dSValue * dSValue + dWValue * dWValue +
                     dEValue * dEValue) /
@@ -166,7 +168,7 @@ int main(int argc, char *argv[]) {
         den = (qsqr - q0sqr) / (q0sqr * (1 + q0sqr));
         float cValue = 1.0 / (1.0 + den);
         // saturate diffusion coefficent
-        cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
+        // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
         c[k] = cValue;
 
         // uint64_t dk = i * cols * 4 + j * 4;
@@ -186,36 +188,29 @@ int main(int argc, char *argv[]) {
 #endif
 
 #pragma omp parallel for firstprivate(rows, cols, lambda) schedule(static)
-    for (uint64_t i = 0; i < rows - 1; i++) {
+    for (uint64_t i = 1; i < rows - 1; i++) {
+#ifdef GEM_FORGE_FIX_INPUT
+#pragma omp simd
+      for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
+        uint64_t k = i * GEM_FORGE_FIX_COLS + j;
+        uint64_t kS = k + GEM_FORGE_FIX_COLS;
+#else
       for (uint64_t j = 0; j < cols; j++) {
+        uint64_t k = i * cols + j;
+        uint64_t kS = k + cols;
+#endif
         /**
          * ! Accessing j + 1.
          * Out of bound.
          */
 
-        // current index
-        uint64_t k = i * cols + j;
-
         // diffusion coefficent
         float cN = c[k];
-        // float cS = cN;
-        // if (i < rows - 1) {
-        //   cS = c[k + cols];
-        // }
-        float cS = c[k + cols];
+        float cS = c[kS];
         float cW = cN;
-        // float cE = cW;
-        // if (j < cols - 1) {
-        //   cE = c[k + 1];
-        // }
         float cE = c[k + 1];
 
         // divergence (equ 58)
-        // uint64_t dk = i * cols * 4 + j * 4;
-        // float dNValue = delta[dk + 0];
-        // float dSValue = delta[dk + 1];
-        // float dWValue = delta[dk + 2];
-        // float dEValue = delta[dk + 3];
         float dNValue = deltaN[k];
         float dSValue = deltaS[k];
         float dWValue = deltaW[k];
@@ -235,18 +230,6 @@ int main(int argc, char *argv[]) {
   m5_detail_sim_end();
   exit(0);
 #endif
-
-#ifdef OUTPUT
-  for (int i = 0; i < rows; i++) {
-    for (int j = 0; j < cols; j++) {
-
-      printf("%.5f ", J[i * cols + j]);
-    }
-    printf("\n");
-  }
-#endif
-
-  printf("Computation Done\n");
 
   free(I);
   free(J);
