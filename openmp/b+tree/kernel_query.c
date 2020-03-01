@@ -34,30 +34,42 @@ void kernel_query(int nthreads, record *records, knode *knodes,
     int target = keys[bid];
     knode *curKnode = &knodes[0];
 
-    // process levels of the tree
-    for (uint64_t i = 0; i < maxheight; i++) {
-
-      // process all leaves at each level
+    {
+      // Peel down the iteration for root node.
+      int nextKnodeId = -1;
       for (uint64_t thid = 0; thid < threadsPerBlock; thid++) {
-
-        // if value is between the two keys
         int lhsKey = curKnode->keys[thid];
         int rhsKey = curKnode->keys[thid + 1];
         if (lhsKey <= target && rhsKey > target) {
-          int indice = curKnode->indices[thid];
-          curKnode = &knodes[indice];
-          break;
+          nextKnodeId = thid;
         }
       }
+      curKnode = &knodes[curKnode->indices[nextKnodeId]];
+    }
+
+    for (uint64_t i = 1; i < maxheight; i++) {
+      int nextKnodeId = -1;
+      for (uint64_t thid = 0; thid < threadsPerBlock; thid++) {
+        int lhsKey = curKnode->keys[thid];
+        int rhsKey = curKnode->keys[thid + 1];
+        if (lhsKey <= target && rhsKey > target) {
+          nextKnodeId = thid;
+        }
+      }
+      curKnode = &knodes[curKnode->indices[nextKnodeId]];
     }
 
     // At this point, we have a candidate leaf node which may contain
     // the target record.  Check each key to hopefully find the record
     // process all leaves at each level
+    int valueId = -1;
     for (uint64_t thid = 0; thid < threadsPerBlock; thid++) {
       if (curKnode->keys[thid] == target) {
-        ans[bid].value = records[curKnode->indices[thid]].value;
+        valueId = thid;
       }
+    }
+    if (valueId != -1) {
+      ans[bid].value = records[curKnode->indices[valueId]].value;
     }
   }
 

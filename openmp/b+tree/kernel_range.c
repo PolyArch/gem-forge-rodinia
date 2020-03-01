@@ -34,65 +34,65 @@ void kernel_range(int cores_arg, knode *knodes, long knodes_elem, int order,
     const int targetEnd = end[bid];
     knode *lhsKnode = &knodes[0];
     knode *rhsKnode = &knodes[0];
-    knode *nextLHSKnode = NULL;
-    knode *nextRHSKnode = NULL;
 
-    // process levels of the tree
-    for (uint64_t i = 0; i < maxheight; i++) {
-
-      // process all leaves at each level
+    {
+      // Peel down the iteration for the root node.
+      int nextLHSKnodeId = -1;
+      int nextRHSKnodeId = -1;
       for (uint64_t thid = 0; thid < order; thid++) {
 
         int lhsKey1 = lhsKnode->keys[thid];
         int lhsKey2 = lhsKnode->keys[thid + 1];
         if (lhsKey1 <= targetStart && lhsKey2 > targetStart) {
-          // this conditional statement is inserted to avoid crush due to but in
-          // original code "offset[bid]" calculated below that later addresses
-          // part of knodes goes outside of its bounds cause segmentation fault
-          // more specifically, values saved into knodes->indices in the main
-          // function are out of bounds of knodes that they address
-          int indice = lhsKnode->indices[thid];
-          if (indice < knodes_elem) {
-            nextLHSKnode = &knodes[indice];
-          }
+          nextLHSKnodeId = thid;
+        }
+        if (lhsKey1 <= targetEnd && lhsKey2 > targetEnd) {
+          nextRHSKnodeId = thid;
+        }
+      }
+
+      lhsKnode = &knodes[lhsKnode->indices[nextLHSKnodeId]];
+      rhsKnode = &knodes[rhsKnode->indices[nextRHSKnodeId]];
+    }
+
+    // process remaining levels of the tree
+    for (uint64_t i = 1; i < maxheight; i++) {
+      // process all leaves at each level
+      int nextLHSKnodeId = -1;
+      int nextRHSKnodeId = -1;
+      for (uint64_t thid = 0; thid < order; thid++) {
+
+        int lhsKey1 = lhsKnode->keys[thid];
+        int lhsKey2 = lhsKnode->keys[thid + 1];
+        if (lhsKey1 <= targetStart && lhsKey2 > targetStart) {
+          nextLHSKnodeId = thid;
         }
         int rhsKey1 = rhsKnode->keys[thid];
         int rhsKey2 = rhsKnode->keys[thid + 1];
         if (rhsKey1 <= targetEnd && rhsKey2 > targetEnd) {
-          int indice = rhsKnode->indices[thid];
-          if (indice < knodes_elem) {
-            nextRHSKnode = &knodes[indice];
-          } else {
-            assert(false);
-          }
+          nextRHSKnodeId = thid;
         }
       }
 
-      assert(nextLHSKnode);
-      lhsKnode = nextLHSKnode;
-      assert(nextRHSKnode);
-      rhsKnode = nextRHSKnode;
+      lhsKnode = &knodes[lhsKnode->indices[nextLHSKnodeId]];
+      rhsKnode = &knodes[rhsKnode->indices[nextRHSKnodeId]];
     }
 
     // process leaves
-    int startRec = 0;
+    int startRecId = -1;
+    int endRecId = -1;
     for (uint64_t thid = 0; thid < order; thid++) {
       // Find the index of the starting record
       if (lhsKnode->keys[thid] == targetStart) {
-        startRec = lhsKnode->indices[thid];
-        break;
+        startRecId = thid;
+      }
+      if (rhsKnode->keys[thid] == targetEnd) {
+        endRecId = thid;
       }
     }
 
-    // process leaves
-    int endRec = 0;
-    for (uint64_t thid = 0; thid < order; thid++) {
-      // Find the index of the ending record
-      if (rhsKnode->keys[thid] == targetEnd) {
-        endRec = rhsKnode->indices[thid];
-        break;
-      }
-    }
+    int startRec = startRecId != -1 ? lhsKnode->indices[startRecId] : 0;
+    int endRec = endRecId != -1 ? rhsKnode->indices[endRecId] : 0;
     recstart[bid] = startRec;
     reclength[bid] = endRec - startRec + 1;
   }
