@@ -3,14 +3,14 @@ CC = gcc
 CFLAGS = -lm -fopenmp -Wall
 
 
-all : nn
+all: nn.exe
 
-clean :
-	rm -rf *.o nn
+clean:
+	rm -rf *.o nn.exe hurricane_gen.exe
 
-nn : nn_openmp.c
+nn.exe: nn.c
 	$(CC) -o $@ $< $(LDFLAGS) $(CFLAGS) 
 
-hurricane_gen : hurricane_gen.c
+hurricane_gen.exe: hurricane_gen.c
 	$(LOCAL_CC) -o $@ $< -lm
 
