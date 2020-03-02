@@ -13,7 +13,7 @@ riscv: raw.riscv.exe
 %.bc: %.c
 	$(CC) $(CC_FLAGS) $^ -emit-llvm -c -o $@
 
-raw.bc: ex_particle_OPENMP_seq.bc
+raw.bc: particlefilter.bc
 	llvm-link $^ -o $@
 	opt -instnamer $@ -o $@
 

@@ -293,16 +293,12 @@ double calcLikelihoodSum(int *I, int *ind, int numOnes) {
  * last index
  */
 int findIndex(double *CDF, int lengthCDF, double value) {
-  int index = -1;
-  int x;
-  for (x = 0; x < lengthCDF; x++) {
+  uint64_t index = lengthCDF - 1;
+  for (uint64_t x = 0; x < lengthCDF; x++) {
+    index = x;
     if (CDF[x] >= value) {
-      index = x;
       break;
     }
-  }
-  if (index == -1) {
-    return lengthCDF - 1;
   }
   return index;
 }
@@ -373,7 +369,7 @@ __attribute__((noinline)) void applyMotionModel(KernelArgs args) {
   ExtractArgs(uint64_t, Nparticles);
   ExtractArgs(int *, seed);
 #ifdef GEM_FORGE
-    m5_work_begin(0, 0);
+  m5_work_begin(0, 0);
 #endif
 // apply motion model
 // draws sample from motion model (random walk). The only prior information
@@ -385,7 +381,7 @@ __attribute__((noinline)) void applyMotionModel(KernelArgs args) {
     arrayY[x] += -2 + 2 * randn(seed, x);
   }
 #ifdef GEM_FORGE
-    m5_work_end(0, 0);
+  m5_work_end(0, 0);
 #endif
 
   printf("1 applyMotionModel done.\n");
@@ -411,7 +407,7 @@ __attribute__((noinline)) void computeLikelihood(KernelArgs args) {
   ExtractArgs(int *, I);
   ExtractArgs(int *, ind);
 #ifdef GEM_FORGE
-    m5_work_begin(1, 0);
+  m5_work_begin(1, 0);
 #endif
 #pragma omp parallel for firstprivate(Nparticles, countOnes, max_size, IszX,   \
                                       IszY, Nfr, k, likelihood, I, arrayX,     \
@@ -452,7 +448,7 @@ __attribute__((noinline)) void computeLikelihood(KernelArgs args) {
     likelihood[x] = likelihoodValue / ((double)countOnes);
   }
 #ifdef GEM_FORGE
-    m5_work_end(1, 0);
+  m5_work_end(1, 0);
 #endif
   printf("2 computeLikelihood done.\n");
 }
@@ -463,7 +459,7 @@ __attribute__((noinline)) void updateWeight(KernelArgs args) {
   ExtractArgs(double *, weights);
   double sumWeights = 0;
 #ifdef GEM_FORGE
-    m5_work_begin(2, 0);
+  m5_work_begin(2, 0);
 #endif
 #pragma omp parallel for firstprivate(Nparticles, weights, likelihood) reduction(+ : sumWeights)
   for (uint64_t x = 0; x < Nparticles; x++) {
@@ -473,10 +469,10 @@ __attribute__((noinline)) void updateWeight(KernelArgs args) {
     weights[x] = weight;
   }
 #ifdef GEM_FORGE
-    m5_work_end(2, 0);
+  m5_work_end(2, 0);
 #endif
 #ifdef GEM_FORGE
-    m5_work_begin(3, 0);
+  m5_work_begin(3, 0);
 #endif
 #pragma omp parallel for firstprivate(Nparticles, weights, sumWeights)
   for (uint64_t x = 0; x < Nparticles; x++) {
@@ -484,7 +480,7 @@ __attribute__((noinline)) void updateWeight(KernelArgs args) {
     weights[x] = weight / sumWeights;
   }
 #ifdef GEM_FORGE
-    m5_work_end(3, 0);
+  m5_work_end(3, 0);
 #endif
 
   printf("3 updateWeight done.\n");
@@ -501,7 +497,7 @@ __attribute((noinline)) void averageParticles(KernelArgs args) {
   double ye = 0;
 // estimate the object location by expected values
 #ifdef GEM_FORGE
-    m5_work_begin(4, 0);
+  m5_work_begin(4, 0);
 #endif
 #pragma omp parallel for firstprivate(Nparticles, arrayX, arrayY, weights) reduction(+ : xe, ye)
   for (uint64_t x = 0; x < Nparticles; x++) {
@@ -509,7 +505,7 @@ __attribute((noinline)) void averageParticles(KernelArgs args) {
     ye += arrayY[x] * weights[x];
   }
 #ifdef GEM_FORGE
-    m5_work_end(4, 0);
+  m5_work_end(4, 0);
 #endif
   double distance = sqrt(pow((double)(xe - (int)roundDouble(IszY / 2.0)), 2) +
                          pow((double)(ye - (int)roundDouble(IszX / 2.0)), 2));
@@ -528,20 +524,20 @@ __attribute__((noinline)) void resampleParticles(KernelArgs args) {
   ExtractArgs(int *, seed);
 
 #ifdef GEM_FORGE
-    m5_work_begin(5, 0);
+  m5_work_begin(5, 0);
 #endif
   CDF[0] = weights[0];
   for (uint64_t x = 1; x < Nparticles; x++) {
     CDF[x] = weights[x] + CDF[x - 1];
   }
 #ifdef GEM_FORGE
-    m5_work_end(5, 0);
+  m5_work_end(5, 0);
 #endif
 
   printf("5 computeCDF done.\n");
 
 #ifdef GEM_FORGE
-    m5_work_begin(6, 0);
+  m5_work_begin(6, 0);
 #endif
   double u1 = (1 / ((double)(Nparticles))) * randu(seed, 0);
 #pragma omp parallel for firstprivate(u, u1, Nparticles) schedule(static)
@@ -549,31 +545,29 @@ __attribute__((noinline)) void resampleParticles(KernelArgs args) {
     u[x] = u1 + x / ((double)(Nparticles));
   }
 #ifdef GEM_FORGE
-    m5_work_end(6, 0);
+  m5_work_end(6, 0);
 #endif
 
   printf("6 computeU done.\n");
 
 #ifdef GEM_FORGE
-    m5_work_begin(7, 0);
+  m5_work_begin(7, 0);
 #endif
 #pragma omp parallel for firstprivate(CDF, Nparticles, xj, yj, u, arrayX,      \
                                       arrayY)
   for (uint64_t j = 0; j < Nparticles; j++) {
     int i = findIndex(CDF, Nparticles, u[j]);
-    if (i == -1)
-      i = Nparticles - 1;
     xj[j] = arrayX[i];
     yj[j] = arrayY[i];
   }
 #ifdef GEM_FORGE
-    m5_work_end(7, 0);
+  m5_work_end(7, 0);
 #endif
 
   printf("7 resample done.\n");
 
 #ifdef GEM_FORGE
-    m5_work_begin(8, 0);
+  m5_work_begin(8, 0);
 #endif
 #pragma omp parallel for firstprivate(weights, Nparticles, arrayX, arrayY, xj, \
                                       yj)
@@ -584,7 +578,7 @@ __attribute__((noinline)) void resampleParticles(KernelArgs args) {
     weights[x] = 1 / ((double)(Nparticles));
   }
 #ifdef GEM_FORGE
-    m5_work_end(8, 0);
+  m5_work_end(8, 0);
 #endif
 
   printf("8 reset done.\n");
@@ -649,6 +643,40 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
     arrayY[x] = ye;
   }
 
+#define TO_KB(x) x >> 10
+#define TO_MB(x) x >> 20
+#define PRINT_SIZE_KB(x) printf("sizeof %10s = %lukB.\n", #x, TO_KB(x##Size))
+#define PRINT_SIZE_MB(x) printf("sizeof %10s = %luMB.\n", #x, TO_MB(x##Size))
+  {
+    size_t objxySize = countOnes * 2 * sizeof(double);
+    size_t weightsSize = Nparticles * sizeof(double);
+    size_t likelihoodSize = Nparticles * sizeof(double);
+    size_t arrayXSize = Nparticles * sizeof(double);
+    size_t arrayYSize = Nparticles * sizeof(double);
+    size_t xjSize = Nparticles * sizeof(double);
+    size_t yjSize = Nparticles * sizeof(double);
+    size_t CDFSize = Nparticles * sizeof(double);
+    size_t uSize = Nparticles * sizeof(double);
+    size_t indSize = Nparticles * countOnes * sizeof(int);
+    size_t totalSize = objxySize + weightsSize + likelihoodSize + arrayXSize +
+                       arrayYSize + xjSize + yjSize + CDFSize + uSize + indSize;
+    PRINT_SIZE_KB(objxy);
+    PRINT_SIZE_KB(weights);
+    PRINT_SIZE_KB(likelihood);
+    PRINT_SIZE_KB(arrayX);
+    PRINT_SIZE_KB(arrayY);
+    PRINT_SIZE_KB(xj);
+    PRINT_SIZE_KB(yj);
+    PRINT_SIZE_KB(CDF);
+    PRINT_SIZE_KB(u);
+    PRINT_SIZE_KB(ind);
+    PRINT_SIZE_MB(total);
+  }
+#undef PRINT_SIZE_MB
+#undef PRINT_SIZE_KB
+#undef TO_KB
+#undef TO_MB
+
   // Prepare the arguments to the kernel.
   KernelArgs args;
   args.Nparticles = Nparticles;
@@ -675,6 +703,29 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
   omp_set_num_threads(Nthreads);
   omp_set_schedule(omp_sched_static, 0);
   m5_detail_sim_start();
+
+#ifdef GEM_FORGE_WARM_CACHE
+#define VOLATILE_LOAD(x, i) volatile uint8_t x##V = ((uint8_t *)x)[i];
+  for (uint64_t i = 0; i < Nparticles * sizeof(double); i += 64) {
+    VOLATILE_LOAD(weights, i);
+    VOLATILE_LOAD(likelihood, i);
+    VOLATILE_LOAD(arrayX, i);
+    VOLATILE_LOAD(arrayY, i);
+    VOLATILE_LOAD(xj, i);
+    VOLATILE_LOAD(yj, i);
+    VOLATILE_LOAD(CDF, i);
+    VOLATILE_LOAD(u, i);
+  }
+  for (uint64_t i = 0; i < countOnes * 2 * sizeof(double); i += 64) {
+    VOLATILE_LOAD(objxy, i);
+  }
+  for (uint64_t i = 0; i < countOnes * Nparticles * sizeof(int); i += 64) {
+    VOLATILE_LOAD(ind, i);
+  }
+#undef VOLATILE_LOAD
+  m5_reset_stats(0, 0);
+#endif
+
 #endif
   for (int k = 1; k < Nfr; k++) {
     args.k = k;
