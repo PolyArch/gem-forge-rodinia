@@ -79,8 +79,8 @@ void kernel_range(int cores_arg, knode *knodes, long knodes_elem, int order,
     }
 
     // process leaves
-    int startRecId = -1;
-    int endRecId = -1;
+    uint64_t startRecId = UINT64_MAX;
+    uint64_t endRecId = UINT64_MAX;
     for (uint64_t thid = 0; thid < order; thid++) {
       // Find the index of the starting record
       if (lhsKnode->keys[thid] == targetStart) {
@@ -91,8 +91,8 @@ void kernel_range(int cores_arg, knode *knodes, long knodes_elem, int order,
       }
     }
 
-    int startRec = startRecId != -1 ? lhsKnode->indices[startRecId] : 0;
-    int endRec = endRecId != -1 ? rhsKnode->indices[endRecId] : 0;
+    int startRec = startRecId != UINT64_MAX ? lhsKnode->indices[startRecId] : 0;
+    int endRec = endRecId != UINT64_MAX ? rhsKnode->indices[endRecId] : 0;
     recstart[bid] = startRec;
     reclength[bid] = endRec - startRec + 1;
   }
