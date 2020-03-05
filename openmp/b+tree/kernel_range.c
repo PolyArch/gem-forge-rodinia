@@ -15,8 +15,8 @@ void kernel_range(int cores_arg, knode *knodes, long knodes_elem, int order,
   //	Variables
   //======================================================================================================================================================150
 
-  omp_set_num_threads(cores_arg);
-  printf("OMP threads = %d\n", cores_arg);
+  // omp_set_num_threads(cores_arg);
+  // printf("OMP threads = %d\n", cores_arg);
 
 #ifdef DUMP_OUTPUT
   long long time1 = get_time();

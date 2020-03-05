@@ -15,9 +15,6 @@ void kernel_query(int nthreads, record *records, knode *knodes,
   //======================================================================================================================================================150
 
   // timer
-  omp_set_num_threads(nthreads);
-  printf("OMP threads = %d\n", nthreads);
-
   const int threadsPerBlock = order < 1024 ? order : 1024;
 
 #ifdef DUMP_OUTPUT

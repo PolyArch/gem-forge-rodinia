@@ -17,7 +17,8 @@
 #include <stdio.h> // (in directory known to compiler)			needed by printf, stderr
 // #include <sys/time.h> //
 // (in directory known to compiler)			needed by ???
-#include <math.h>   // (in directory known to compiler)			needed by log, pow
+#include <math.h> // (in directory known to compiler)			needed by log, pow
+#include <omp.h>
 #include <string.h> // (in directory known to compiler)			needed by memset
 
 #include "common.h" // (in directory provided here)
@@ -96,25 +97,7 @@ struct CommonOMPArgs {
   long records_elem;
 };
 
-void doQuery(struct CommonOMPArgs args, int count) {
-  printf("\n ******command: k count=%d \n", count);
-
-  if (count > 65535) {
-    printf("ERROR: Number of requested querries should be 65,535 at most. "
-           "(limited by # of CUDA blocks)\n");
-    exit(0);
-  }
-
-  int *keys = (int *)malloc(count * sizeof(int));
-  for (int i = 0; i < count; i++) {
-    keys[i] = (rand() / (float)RAND_MAX) * size;
-  }
-
-  record *ans = (record *)malloc(sizeof(record) * count);
-  for (int i = 0; i < count; i++) {
-    ans[i].value = -1;
-  }
-
+void doQuery(struct CommonOMPArgs args, int count, int *keys, record *ans) {
   kernel_query(args.nthreads, args.records, args.knodes, args.knodes_elem,
                order, maxheight, count, keys, ans);
 
@@ -133,36 +116,10 @@ void doQuery(struct CommonOMPArgs args, int count) {
   fprintf(pFile, " \n");
   fclose(pFile);
 #endif
-
-  free(keys);
-  free(ans);
 }
 
-void doRange(struct CommonOMPArgs args, int count, int rSize) {
-  if (rSize > size || rSize < 0) {
-    printf("Search range size is larger than data set size %d.\n", (int)size);
-    exit(0);
-  }
-
-  int *start = (int *)malloc(count * sizeof(int));
-  int *end = (int *)malloc(count * sizeof(int));
-  // INPUT: start, end CPU initialization
-  for (int i = 0; i < count; i++) {
-    start[i] = (rand() / (float)RAND_MAX) * size;
-    end[i] = start[i] + rSize;
-    if (end[i] >= size) {
-      start[i] = start[i] - (end[i] - size);
-      end[i] = size - 1;
-    }
-  }
-
-  int *recstart = (int *)malloc(count * sizeof(int));
-  int *reclength = (int *)malloc(count * sizeof(int));
-  for (int i = 0; i < count; i++) {
-    recstart[i] = 0;
-    reclength[i] = 0;
-  }
-
+void doRange(struct CommonOMPArgs args, int count, int rSize, int *start,
+             int *end, int *recstart, int *reclength) {
   kernel_range(args.nthreads, args.knodes, args.knodes_elem, order, maxheight,
                count, start, end, recstart, reclength);
 
@@ -181,11 +138,6 @@ void doRange(struct CommonOMPArgs args, int count, int rSize) {
   fprintf(pFile, " \n");
   fclose(pFile);
 #endif
-
-  free(start);
-  free(end);
-  free(recstart);
-  free(reclength);
 }
 
 int main(int argc, char **argv) {
@@ -269,7 +221,54 @@ int main(int argc, char **argv) {
 
     fclose(o);
   }
-  printf("knodes %d.\n", knodes_elem);
+  printf("knodes %ld.\n", knodes_elem);
+
+  // kernel query range 10000
+  int query_count = 10000;
+  printf("******command: k count=%d \n", query_count);
+  if (query_count > 65535) {
+    printf("ERROR: Number of requested querries should be 65,535 at most. "
+           "(limited by # of CUDA blocks)\n");
+    exit(0);
+  }
+  int *keys = (int *)malloc(query_count * sizeof(int));
+  for (int i = 0; i < query_count; i++) {
+    keys[i] = (rand() / (float)RAND_MAX) * size;
+  }
+  record *ans = (record *)malloc(sizeof(record) * query_count);
+  for (int i = 0; i < query_count; i++) {
+    ans[i].value = -1;
+  }
+
+  // kernel_range
+  int range_count = 6000;
+  int range_rSize = 3000;
+  if (range_rSize > size || range_rSize < 0) {
+    printf("Search range size is larger than data set size %d.\n", (int)size);
+    exit(0);
+  }
+
+  int *start = (int *)malloc(range_count * sizeof(int));
+  int *end = (int *)malloc(range_count * sizeof(int));
+  // INPUT: start, end CPU initialization
+  for (int i = 0; i < range_count; i++) {
+    start[i] = (rand() / (float)RAND_MAX) * size;
+    end[i] = start[i] + range_rSize;
+    if (end[i] >= size) {
+      start[i] = start[i] - (end[i] - size);
+      end[i] = size - 1;
+    }
+  }
+
+  int *recstart = (int *)malloc(range_count * sizeof(int));
+  int *reclength = (int *)malloc(range_count * sizeof(int));
+  for (int i = 0; i < range_count; i++) {
+    recstart[i] = 0;
+    reclength[i] = 0;
+  }
+
+  omp_set_num_threads(cores_arg);
+  printf("nthreads = %d.\n", cores_arg);
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
@@ -278,6 +277,11 @@ int main(int argc, char **argv) {
     volatile char c = ((char *)krecords)[i];
   }
   for (int i = 0; i < knodes_elem * sizeof(knode); i += 64) {
+    volatile char c = ((char *)knodes)[i];
+  }
+// Just do a dummy omp parallel loop to initialize threads.
+#pragma omp parallel for schedule(static)
+  for (int i = 0; i < cores_arg; ++i) {
     volatile char c = ((char *)knodes)[i];
   }
   printf("Warm up done.");
@@ -290,17 +294,24 @@ int main(int argc, char **argv) {
   args.records_elem = size;
   args.knodes = knodes;
   args.knodes_elem = knodes_elem;
-  doQuery(args, 10000);
-  doRange(args, 6000, 3000);
+  doQuery(args, query_count, keys, ans);
+  doRange(args, range_count, range_rSize, start, end, recstart, reclength);
 
 #ifdef GEM_FORGE
   m5_detail_sim_end();
+  exit(0);
 #endif
 
   // ------------------------------------------------------------60
   // free remaining memory and exit
   // ------------------------------------------------------------60
 
+  free(start);
+  free(end);
+  free(recstart);
+  free(reclength);
+  free(keys);
+  free(ans);
   free(krecords);
   free(knodes);
   return EXIT_SUCCESS;
