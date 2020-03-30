@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -227,6 +228,9 @@ int main(int argc, char **argv) {
   int layers = atoi(argv[2]);
   int iterations = atoi(argv[3]);
   int numThreads = atoi(argv[4]);
+  if (numThreads + 2 > layers) {
+    numThreads = (layers > 2) ? (layers - 2) : 1;
+  }
 
   /* calculating parameters*/
 
@@ -258,6 +262,9 @@ int main(int argc, char **argv) {
   omp_set_dynamic(0);
   omp_set_num_threads(numThreads);
   printf("%d threads running\n", omp_get_num_threads());
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();

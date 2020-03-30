@@ -73,6 +73,7 @@
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -85,165 +86,191 @@
 #endif
 
 extern double wtime(void);
-extern int num_omp_threads;
+extern uint64_t num_omp_threads;
 
-int find_nearest_point(float *pt,                  /* [nfeatures] */
-                       int nfeatures, float **pts, /* [npts][nfeatures] */
-                       int npts) {
-  int index, i;
+/*----< euclid_dist_2() >----------------------------------------------------*/
+/* multi-dimensional spatial Euclid distance square */
+inline float euclid_dist_2(float *pt1, float *pt2, uint64_t numdims) {
+  float ans = 0.0;
+
+  for (uint64_t i = 0; i < numdims; i++) {
+    ans += (pt1[i] - pt2[i]) * (pt1[i] - pt2[i]);
+  }
+
+  return ans;
+}
+
+uint64_t find_nearest_point(float *pt, /* [nfeatures] */
+                            uint64_t nfeatures,
+                            float *pts, /* [npts][nfeatures] */
+                            uint64_t npts) {
+  uint64_t index;
   float min_dist = FLT_MAX;
 
   /* find the cluster center id with min distance to pt */
-  for (i = 0; i < npts; i++) {
-    float dist;
-    dist = euclid_dist_2(pt, pts[i], nfeatures); /* no need square root */
+  for (uint64_t i = 0; i < npts; i++) {
+    float *center = pts + (i * nfeatures);
+    float dist = euclid_dist_2(pt, center, nfeatures); /* no need square root */
     if (dist < min_dist) {
       min_dist = dist;
       index = i;
     }
   }
-  return (index);
+  return index;
 }
 
-/*----< euclid_dist_2() >----------------------------------------------------*/
-/* multi-dimensional spatial Euclid distance square */
-__inline float euclid_dist_2(float *pt1, float *pt2, int numdims) {
-  int i;
-  float ans = 0.0;
-
-  for (i = 0; i < numdims; i++)
-    ans += (pt1[i] - pt2[i]) * (pt1[i] - pt2[i]);
-
-  return (ans);
-}
-
-/*----< kmeans_clustering() >---------------------------------------------*/
-float **kmeans_clustering(float **feature, /* in: [npoints][nfeatures] */
-                          int nfeatures, int npoints, int nclusters,
-                          float threshold, int *membership) /* out: [npoints] */
-{
-
-  int i, j, k, n = 0, index, loop = 0;
-  int *new_centers_len; /* [nclusters]: no. of points in each cluster */
-  float **new_centers;  /* [nclusters][nfeatures] */
-  float **clusters;     /* out: [nclusters][nfeatures] */
-  float delta;
-
-  double timing;
-
-  int nthreads;
-  int **partial_new_centers_len;
-  float ***partial_new_centers;
-
-  nthreads = num_omp_threads;
-
-  /* allocate space for returning variable clusters[] */
-  clusters = (float **)malloc(nclusters * sizeof(float *));
-  clusters[0] = (float *)malloc(nclusters * nfeatures * sizeof(float));
-  for (i = 1; i < nclusters; i++)
-    clusters[i] = clusters[i - 1] + nfeatures;
-
-  /* randomly pick cluster centers */
-  for (i = 0; i < nclusters; i++) {
-    // n = (int)rand() % npoints;
-    for (j = 0; j < nfeatures; j++)
-      clusters[i][j] = feature[n][j];
-    n++;
-  }
-
-  for (i = 0; i < npoints; i++)
-    membership[i] = -1;
-
-  /* need to initialize new_centers_len and new_centers[0] to all 0 */
-  new_centers_len = (int *)calloc(nclusters, sizeof(int));
-
-  new_centers = (float **)malloc(nclusters * sizeof(float *));
-  new_centers[0] = (float *)calloc(nclusters * nfeatures, sizeof(float));
-  for (i = 1; i < nclusters; i++)
-    new_centers[i] = new_centers[i - 1] + nfeatures;
-
-  partial_new_centers_len = (int **)malloc(nthreads * sizeof(int *));
-  partial_new_centers_len[0] = (int *)calloc(nthreads * nclusters, sizeof(int));
-  for (i = 1; i < nthreads; i++)
-    partial_new_centers_len[i] = partial_new_centers_len[i - 1] + nclusters;
-
-  partial_new_centers = (float ***)malloc(nthreads * sizeof(float **));
-  partial_new_centers[0] =
-      (float **)malloc(nthreads * nclusters * sizeof(float *));
-  for (i = 1; i < nthreads; i++)
-    partial_new_centers[i] = partial_new_centers[i - 1] + nclusters;
-
-  for (i = 0; i < nthreads; i++) {
-    for (j = 0; j < nclusters; j++)
-      partial_new_centers[i][j] = (float *)calloc(nfeatures, sizeof(float));
-  }
-  printf("num of threads = %d\n", num_omp_threads);
+__attribute__((noinline)) void
+kmeans_kernel(float *feature, uint64_t nfeatures, uint64_t npoints,
+              uint64_t nclusters, float threshold, uint64_t *membership,
+              float *clusters, uint64_t *new_centers_len, float *new_centers,
+              uint64_t *partial_new_centers_len, float *partial_new_centers) {
+  omp_set_num_threads(num_omp_threads);
+  omp_set_dynamic(0);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #endif
 
-  omp_set_num_threads(num_omp_threads);
-  omp_set_dynamic(0);
+  uint64_t loop = 0;
   do {
-    delta = 0.0;
+
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
+#endif
+
 #pragma omp parallel shared(feature, clusters, membership,                     \
                             partial_new_centers, partial_new_centers_len)
     {
-      int tid = omp_get_thread_num();
-#pragma omp for \
-                        private(i,j,index) \
-                        firstprivate(npoints,nclusters,nfeatures) \
-                        schedule(static) \
-                        reduction(+:delta)
-      for (i = 0; i < npoints; i++) {
+      uint64_t tid = omp_get_thread_num();
+      uint64_t *my_partial_new_centers_len =
+          partial_new_centers_len + tid * nclusters;
+      float *my_partial_new_centers =
+          partial_new_centers + tid * nclusters * nfeatures;
+#pragma omp for firstprivate(npoints, nclusters, nfeatures) schedule(static)
+      for (uint64_t i = 0; i < npoints; i++) {
+        float *point = feature + i * nfeatures;
         /* find the index of nestest cluster centers */
-        index = find_nearest_point(feature[i], nfeatures, clusters, nclusters);
-        /* if membership changes, increase delta by 1 */
-        if (membership[i] != index)
-          delta += 1.0;
+        uint64_t index;
+        {
+          float min_dist = FLT_MAX;
+          for (uint64_t i = 0; i < nclusters; i++) {
+            float *center = clusters + (i * nfeatures);
+            float dist = euclid_dist_2(point, center, nfeatures);
+            if (dist < min_dist) {
+              min_dist = dist;
+              index = i;
+            }
+          }
+        }
 
         /* assign the membership to object i */
         membership[i] = index;
 
         /* update new cluster centers : sum of all objects located
                within */
-        partial_new_centers_len[tid][index]++;
-        for (j = 0; j < nfeatures; j++)
-          partial_new_centers[tid][index][j] += feature[i][j];
+        my_partial_new_centers_len[index]++;
+        for (uint64_t j = 0; j < nfeatures; j++) {
+          uint64_t partial_new_center_idx = index * nfeatures + j;
+          my_partial_new_centers[partial_new_center_idx] += point[j];
+        }
       }
     } /* end of #pragma omp parallel */
 
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+    m5_work_begin(1, 0);
+#endif
+
     /* let the main thread perform the array reduction */
-    for (i = 0; i < nclusters; i++) {
-      for (j = 0; j < nthreads; j++) {
-        new_centers_len[i] += partial_new_centers_len[j][i];
-        partial_new_centers_len[j][i] = 0.0;
-        for (k = 0; k < nfeatures; k++) {
-          new_centers[i][k] += partial_new_centers[j][i][k];
-          partial_new_centers[j][i][k] = 0.0;
+    for (uint64_t j = 0; j < num_omp_threads; j++) {
+      for (uint64_t i = 0; i < nclusters; i++) {
+        uint64_t partial_len_idx = j * nclusters + i;
+        uint64_t partial_len = partial_new_centers_len[partial_len_idx];
+        partial_new_centers_len[partial_len_idx] = 0;
+        uint64_t new_centers_len_v = new_centers_len[i];
+        new_centers_len[i] = new_centers_len_v + partial_len;
+        for (uint64_t k = 0; k < nfeatures; k++) {
+          uint64_t idx = i * nfeatures + k;
+          uint64_t partial_idx = j * nclusters * nfeatures + i * nfeatures + k;
+          uint64_t partial_new_center = partial_new_centers[partial_idx];
+          partial_new_centers[partial_idx] = 0.0;
+          uint64_t new_center = new_centers[idx];
+          new_centers[idx] = new_center + partial_new_center;
         }
       }
     }
 
+#ifdef GEM_FORGE
+    m5_work_end(1, 0);
+    m5_work_begin(2, 0);
+#endif
+
     /* replace old cluster centers with new_centers */
-    for (i = 0; i < nclusters; i++) {
-      for (j = 0; j < nfeatures; j++) {
-        if (new_centers_len[i] > 0)
-          clusters[i][j] = new_centers[i][j] / new_centers_len[i];
-        new_centers[i][j] = 0.0; /* set back to 0 */
-      }
+    for (uint64_t i = 0; i < nclusters; i++) {
+      uint64_t len = new_centers_len[i];
+      len = len == 0 ? 1 : len;
       new_centers_len[i] = 0; /* set back to 0 */
+      for (uint64_t j = 0; j < nfeatures; j++) {
+        uint64_t idx = i * nfeatures + j;
+        clusters[idx] = new_centers[idx] / len;
+        new_centers[idx] = 0.0; /* set back to 0 */
+      }
     }
 
-  } while (delta > threshold && loop++ < 500);
+#ifdef GEM_FORGE
+    m5_work_end(2, 0);
+#endif
+
+  } while (loop++ < 500);
 #ifdef GEM_FORGE
   m5_detail_sim_end();
 #endif
+}
 
-  free(new_centers[0]);
+/*----< kmeans_clustering() >---------------------------------------------*/
+float *kmeans_clustering(float *feature, /* in: [npoints][nfeatures] */
+                         uint64_t nfeatures, uint64_t npoints,
+                         uint64_t nclusters, float threshold,
+                         uint64_t *membership) /* out: [npoints] */
+{
+
+  /**
+   * Clusters is nclusters x nfeatures x sizeof(float).
+   */
+  float *clusters = (float *)malloc(nclusters * nfeatures * sizeof(float));
+
+  /* pick cluster centers to the first ones */
+  for (uint64_t i = 0; i < nclusters; i++) {
+    for (uint64_t j = 0; j < nfeatures; j++) {
+      uint64_t idx = i * nfeatures + j;
+      clusters[idx] = feature[idx];
+    }
+  }
+
+  for (uint64_t i = 0; i < npoints; i++)
+    membership[i] = -1;
+
+  uint64_t *new_centers_len = (uint64_t *)calloc(nclusters, sizeof(uint64_t));
+  float *new_centers = (float *)calloc(nclusters * nfeatures, sizeof(float));
+
+  uint64_t *partial_new_centers_len =
+      (uint64_t *)calloc(num_omp_threads * nclusters, sizeof(uint64_t));
+  float *partial_new_centers = (float *)calloc(
+      num_omp_threads * nclusters * nfeatures, sizeof(float **));
+
+  printf("num of threads = %lu\n", num_omp_threads);
+
+  kmeans_kernel(feature, nfeatures, npoints, nclusters, threshold, membership,
+                clusters, new_centers_len, new_centers, partial_new_centers_len,
+                partial_new_centers);
+
   free(new_centers);
   free(new_centers_len);
+  free(partial_new_centers);
+  free(partial_new_centers_len);
 
   return clusters;
 }

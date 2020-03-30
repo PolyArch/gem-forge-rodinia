@@ -17,7 +17,7 @@
 /*                                                                           */
 /*2       Redistributions in binary form must reproduce the above copyright   */
 /*        notice, this list of conditions and the following disclaimer in the */
-/*        documentation and/or other materials provided with the distribution.*/ 
+/*        documentation and/or other materials provided with the distribution.*/
 /*                                                                            */
 /*3       Neither the name of Northwestern University nor the names of its    */
 /*        contributors may be used to endorse or promote products derived     */
@@ -39,16 +39,17 @@
 #ifndef _H_FUZZY_KMEANS
 #define _H_FUZZY_KMEANS
 
+#include "stdint.h"
+
 #ifndef FLT_MAX
 #define FLT_MAX 3.40282347e+38
 #endif
 
 /* cluster.c */
-int     cluster(int, int, float**, int, float, float***);
+int cluster(int, int, float *, int, float, float **);
 
 /* kmeans_clustering.c */
-float **kmeans_clustering(float**, int, int, int, float, int*);
-float   euclid_dist_2        (float*, float*, int);
-int     find_nearest_point   (float* , int, float**, int);
+float *kmeans_clustering(float *, uint64_t, uint64_t, uint64_t, float,
+                         uint64_t *);
 
 #endif

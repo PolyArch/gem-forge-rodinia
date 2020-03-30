@@ -126,14 +126,6 @@ int main(int argc, char *argv[]) {
     threads = atoi(argv[5]);
   }
 
-#ifdef GEM_FORGE
-  omp_set_dynamic(0);
-  omp_set_schedule(omp_sched_static, 0);
-#endif
-  omp_set_num_threads(threads);
-  // printf("THREAD %d\n", omp_get_thread_num());
-  printf("NUMBER OF THREADS: %d\n", omp_get_num_threads());
-
   time2 = get_time();
 
   //================================================================================80
@@ -147,8 +139,10 @@ int main(int argc, char *argv[]) {
 
   image_ori = (fp *)malloc(sizeof(fp) * image_ori_elem);
 
-  read_graphics("../../data/srad/image.pgm", image_ori, image_ori_rows,
-                image_ori_cols, 1);
+  //   read_graphics("../../data/srad/image.pgm", image_ori, image_ori_rows,
+  //                 image_ori_cols, 1);
+  read_graphics_bin("../../data/srad/image.pgm.data", image_ori, image_ori_rows,
+                    image_ori_cols, 1);
 
   time3 = get_time();
 
@@ -229,6 +223,13 @@ int main(int argc, char *argv[]) {
 
   // printf("iterations: ");
 #ifdef GEM_FORGE
+  omp_set_dynamic(0);
+  omp_set_schedule(omp_sched_static, 0);
+#endif
+  omp_set_num_threads(threads);
+  printf("NUMBER OF THREADS: %d\n", omp_get_num_threads());
+
+#ifdef GEM_FORGE
   m5_detail_sim_start();
 #endif
 
@@ -256,7 +257,7 @@ int main(int argc, char *argv[]) {
     // directional derivatives, ICOV, diffusion coefficent
 #pragma omp parallel for shared(image, dN, dS, dW, dE, c, Nr, Nc, iN, iS, jW,  \
                                 jE) private(i, j, k, Jc, G2, L, num, den,      \
-                                            qsqr)
+                                            qsqr) schedule(static)
     for (j = 0; j < Nc; j++) { // do for the range of columns in IMAGE
 
       for (i = 0; i < Nr; i++) { // do for the range of rows in IMAGE
@@ -266,18 +267,21 @@ int main(int argc, char *argv[]) {
         Jc = image[k];  // get value of the current element
 
         // directional derivates (every element of IMAGE)
-        dN[k] = image[iN[i] + Nr * j] - Jc; // north direction derivative
-        dS[k] = image[iS[i] + Nr * j] - Jc; // south direction derivative
-        dW[k] = image[i + Nr * jW[j]] - Jc; // west direction derivative
-        dE[k] = image[i + Nr * jE[j]] - Jc; // east direction derivative
+        float dNValue =
+            image[iN[i] + Nr * j] - Jc; // north direction derivative
+        float dSValue =
+            image[iS[i] + Nr * j] - Jc; // south direction derivative
+        float dWValue = image[i + Nr * jW[j]] - Jc; // west direction derivative
+        float dEValue = image[i + Nr * jE[j]] - Jc; // east direction derivative
 
         // normalized discrete gradient mag squared (equ 52,53)
-        G2 = (dN[k] * dN[k] + dS[k] * dS[k] // gradient (based on derivatives)
-              + dW[k] * dW[k] + dE[k] * dE[k]) /
+        G2 = (dNValue * dNValue +
+              dSValue * dSValue // gradient (based on derivatives)
+              + dWValue * dWValue + dEValue * dEValue) /
              (Jc * Jc);
 
         // normalized discrete laplacian (equ 54)
-        L = (dN[k] + dS[k] + dW[k] + dE[k]) /
+        L = (dNValue + dSValue + dWValue + dEValue) /
             Jc; // laplacian (based on derivatives)
 
         // ICOV (equ 31/35)
@@ -300,12 +304,16 @@ int main(int argc, char *argv[]) {
         {
           c[k] = 1;
         } // ... set to 1
+        dN[k] = dNValue;
+        dS[k] = dSValue;
+        dW[k] = dWValue;
+        dE[k] = dEValue;
       }
     }
 
     // divergence & image update
-#pragma omp parallel for shared(image, c, Nr, Nc,                              \
-                                lambda) private(i, j, k, D, cS, cN, cW, cE)
+#pragma omp parallel for shared(image, c, Nr, Nc, lambda) private(             \
+    i, j, k, D, cS, cN, cW, cE) schedule(static)
     for (j = 0; j < Nc; j++) { // do for the range of columns in IMAGE
 
       // printf("NUMBER OF THREADS: %d\n", omp_get_num_threads());

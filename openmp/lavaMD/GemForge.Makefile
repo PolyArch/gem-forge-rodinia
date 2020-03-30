@@ -3,14 +3,20 @@ CC=clang
 
 include ../GemForge.Makefile.include
 
-all: bfs.exe
+SOURCES=main.c kernel_cpu.c timer.c num.c
+OBJ_BCS=$(addprefix obj-, ${SOURCES:.c=.bc})
+
+all: lavaMD.exe
 
 riscv: raw.riscv.exe
 
-needle.bc: needle.cpp
-	$(CC) $(CC_FLAGS) -DGEM_FORGE_FIX_INPUT $^ -emit-llvm -c -o $@
+lavaMD.exe: ${SOURCES}
+	${CC} ${CC_FLAGS} $^ -o $@
 
-raw.bc: needle.bc
+obj-%.bc: %.c
+	${CC} ${CC_FLAGS} -fno-unroll-loops $^ -emit-llvm -c -o $@
+
+raw.bc: ${OBJ_BCS}
 	llvm-link $^ -o $@
 	opt -instnamer $@ -o $@
 
@@ -25,4 +31,4 @@ raw.riscv.exe: raw.bc
 	${RISCV_GCC} raw.riscv.o ${RISCV_LD_FLAGS} -o $@
 
 clean:
-	rm -f *.exe *.bc *.ll *.o result.txt
+	rm -f *.exe *.bc *.ll *.o output.txt

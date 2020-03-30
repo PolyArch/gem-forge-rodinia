@@ -8,7 +8,7 @@ all: nn.exe
 riscv: raw.riscv.exe
 
 nn.bc: nn.c
-	$(CC) $(CC_FLAGS) -DIS_BINARY=1 $^ -emit-llvm -c -o $@
+	$(CC) $(CC_FLAGS) -fno-vectorize -DIS_BINARY=1 $^ -emit-llvm -c -o $@
 
 raw.bc: nn.bc
 	llvm-link $^ -o $@

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -12,7 +13,7 @@
 
 #define MAX_ARGS 10
 #define REC_LENGTH 49     // size of a record in db
-#define REC_WINDOW 262144 // number of records to read at a time
+#define REC_WINDOW 2097152 // number of records to read at a time
 #define LATITUDE_POS 28   // location of latitude coordinates in input record
 #define OPEN 10000        // initial value of nearest neighbors
 struct Neighbor {
@@ -59,7 +60,7 @@ struct Record sandbox[REC_WINDOW];
 #else
 char sandbox[REC_LENGTH * REC_WINDOW];
 #endif
-
+int64_t rec_count;
 void final_reduce(int k, int threads, struct Neighbor *neighbors,
                   struct Neighbor *reduce_neighbors) {
   for (int i = 0; i < threads * k; i++) {
@@ -116,7 +117,7 @@ void process(FILE *flist, struct Neighbor *neighbors,
     exit(1);
   }
 
-  float *z = (float *)malloc(REC_WINDOW * sizeof(float));
+  double *z = (double *)malloc(REC_WINDOW * sizeof(double));
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
@@ -150,9 +151,9 @@ void process(FILE *flist, struct Neighbor *neighbors,
 
 // Read in REC_WINDOW number of records
 #if IS_BINARY == 1
-    const int rec_count = fread(sandbox, sizeof(struct Record), REC_WINDOW, fp);
+    rec_count = fread(sandbox, sizeof(struct Record), REC_WINDOW, fp);
 #else
-    const int rec_count = fread(sandbox, REC_LENGTH, REC_WINDOW, fp);
+    rec_count = fread(sandbox, REC_LENGTH, REC_WINDOW, fp);
 #endif
     if (rec_count != REC_WINDOW) {
       if (!ferror(flist)) { // an eof occured
@@ -186,7 +187,7 @@ void process(FILE *flist, struct Neighbor *neighbors,
 
 #pragma omp parallel for firstprivate(z, target_lat, target_long, rec_count)   \
     schedule(static)
-    for (int i = 0; i < rec_count; i++) {
+    for (int64_t i = 0; i < rec_count; i++) {
 #if IS_BINARY == 1
       float tmp_lat = sandbox[i].lat;
       float tmp_long = sandbox[i].lon;
@@ -195,8 +196,8 @@ void process(FILE *flist, struct Neighbor *neighbors,
       float tmp_lat = atof(rec_iter);
       float tmp_long = atof(rec_iter + 5);
 #endif
-      z[i] = sqrt(((tmp_lat - target_lat) * (tmp_lat - target_lat)) +
-                  ((tmp_long - target_long) * (tmp_long - target_long)));
+      z[i] = (((tmp_lat - target_lat) * (tmp_lat - target_lat)) +
+              ((tmp_long - target_long) * (tmp_long - target_long)));
     }
 
 #ifdef GEM_FORGE
@@ -208,7 +209,7 @@ void process(FILE *flist, struct Neighbor *neighbors,
     schedule(static)
     for (int i = 0; i < rec_count; i++) {
       int tid = omp_get_thread_num();
-      float max_dist = -1;
+      double max_dist = -1;
       int max_idx = 0;
       // find a neighbor with greatest dist and take his spot if allowed!
       int reduce_start = tid * k;
@@ -220,7 +221,7 @@ void process(FILE *flist, struct Neighbor *neighbors,
         }
       }
       // compare each record with max value to find the nearest neighbor
-      float dist = z[i];
+      double dist = z[i];
       if (dist < max_dist) {
         reduce_neighbors[max_idx].dist = dist;
         reduce_neighbors[max_idx].update_idx = i;
@@ -264,6 +265,9 @@ int main(int argc, char *argv[]) {
   float target_long = atof(argv[4]);
   int threads = atoi(argv[5]);
   omp_set_num_threads(threads);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
 
   struct Neighbor *neighbors = malloc(k * sizeof(struct Neighbor));
   struct Neighbor *reduce_neighbors =

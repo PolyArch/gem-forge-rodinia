@@ -6,6 +6,7 @@
 
 // #include <stdlib.h>
 // #include <string.h>
+#include <assert.h>
 #include <stdio.h>
 // #include <math.h>
 // #include <time.h>
@@ -141,5 +142,17 @@ void read_graphics(char *filename, fp *input, int data_rows, int data_cols,
   //	CLOSE FILE
   //================================================================================80
 
+  fclose(fid);
+}
+
+void read_graphics_bin(char *filename, fp *input, int data_rows, int data_cols,
+                       int major) {
+  FILE *fid = fopen(filename, "rb");
+  if (fid == NULL) {
+    printf("The file was not opened for reading\n");
+    return;
+  }
+  size_t readed = fread(input, sizeof(input[0]), data_cols * data_rows, fid);
+  assert(readed == data_rows * data_cols);
   fclose(fid);
 }

@@ -17,6 +17,7 @@
 #include <stdio.h> // (in directory known to compiler)			needed by printf, stderr
 // #include <sys/time.h> //
 // (in directory known to compiler)			needed by ???
+#include <malloc.h>
 #include <math.h> // (in directory known to compiler)			needed by log, pow
 #include <omp.h>
 #include <string.h> // (in directory known to compiler)			needed by memset
@@ -268,6 +269,10 @@ int main(int argc, char **argv) {
   }
 
   omp_set_num_threads(cores_arg);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
+
   printf("nthreads = %d.\n", cores_arg);
 
 #ifdef GEM_FORGE

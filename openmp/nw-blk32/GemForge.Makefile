@@ -8,7 +8,7 @@ all: bfs.exe
 riscv: raw.riscv.exe
 
 needle.bc: needle.cpp
-	$(CC) $(CC_FLAGS) -DGEM_FORGE_FIX_INPUT $^ -emit-llvm -c -o $@
+	$(CC) $(CC_FLAGS) -DGEM_FORGE_FIX_INPUT -DBLOCK_SIZE=32 $^ -emit-llvm -c -o $@
 
 raw.bc: needle.bc
 	llvm-link $^ -o $@

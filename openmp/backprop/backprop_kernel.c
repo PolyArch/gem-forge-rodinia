@@ -54,6 +54,9 @@ void bpnn_train_kernel(BPNN *net, float *eo, float *eh) {
   omp_set_dynamic(0);
   omp_set_num_threads(num_threads);
   omp_set_schedule(omp_sched_static, 0);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();

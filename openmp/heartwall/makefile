@@ -4,16 +4,19 @@ override OUTPUT = -DOUTPUT
 endif
 
 # link objects(binaries) together
-heartwall: main.o ./AVI/avilib.o ./AVI/avimod.o
-	gcc main.o ./AVI/avilib.o ./AVI/avimod.o -lm -fopenmp -o heartwall
+heartwall: main.o avilib.o avimod.o
+	gcc $^ -lm -fopenmp -o $@
 
 # compile main function file into object (binary)
 main.o: main.c define.c kernel.c
-	gcc $(OUTPUT) main.c -I./AVI -c -O3 -fopenmp
+	gcc $(OUTPUT) main.c -c -O3 -fopenmp
 
-./AVI/avilib.o ./AVI/avimod.o:
-	cd AVI; make;
+avilib.o: avilib.c
+	gcc -c $^ -o $@
+
+avimod.o: avimod.c
+	gcc -c $^ -o $@
 
 # delete all object files
 clean:
-	rm -f *.o AVI/*.o heartwall
+	rm -f *.o heartwall

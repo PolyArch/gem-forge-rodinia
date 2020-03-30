@@ -18,7 +18,7 @@
 #include <string.h>
 #include <time.h>
 
-__attribute__((packed)) struct Record {
+struct __attribute__((packed)) Record {
   int year;
   int month;
   int date;

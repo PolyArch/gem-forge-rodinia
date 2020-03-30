@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <omp.h>
+#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -44,10 +45,17 @@ template <typename T> T *alloc(int N) { return new T[N]; }
 template <typename T> void dealloc(T *array) { delete[] array; }
 
 template <typename T> void copy(T *dst, T *src, int N) {
+#ifdef GEM_FORGE
+  m5_work_begin(3, 0);
+#endif
 #pragma omp parallel for firstprivate(dst, src, N) schedule(static)
   for (int i = 0; i < N; i++) {
-    dst[i] = src[i];
+    auto v = src[i];
+    dst[i] = v;
   }
+#ifdef GEM_FORGE
+  m5_work_end(3, 0);
+#endif
 }
 
 void dump(double *variables, int nel, int nelr) {
@@ -142,17 +150,20 @@ inline double compute_speed_of_sound(double &density, double &pressure) {
 
 void compute_step_factor(uint64_t nelr, double *variables, double *areas,
                          double *step_factors) {
+#ifdef GEM_FORGE
+  m5_work_begin(0, 0);
+#endif
 #pragma omp parallel for firstprivate(nelr, variables, areas, step_factors)    \
     schedule(static)
   for (uint64_t i = 0; i < nelr; i++) {
-    double density = variables[NVAR * i + VAR_DENSITY];
 
     double3 momentum;
+    double density = variables[NVAR * i + VAR_DENSITY];
     momentum.x = variables[NVAR * i + (VAR_MOMENTUM + 0)];
     momentum.y = variables[NVAR * i + (VAR_MOMENTUM + 1)];
     momentum.z = variables[NVAR * i + (VAR_MOMENTUM + 2)];
-
     double density_energy = variables[NVAR * i + VAR_DENSITY_ENERGY];
+
     double3 velocity;
     compute_velocity(density, momentum, velocity);
     double speed_sqd = compute_speed_sqd(velocity);
@@ -162,15 +173,22 @@ void compute_step_factor(uint64_t nelr, double *variables, double *areas,
     // dt = double(0.5) * std::sqrt(areas[i]) /  (||v|| + c).... but when we do
     // time stepping, this later would need to be divided by the area, so we
     // just do it all at once
-    step_factors[i] = double(0.5) / (std::sqrt(areas[i]) *
+    double area = areas[i];
+    step_factors[i] = double(0.5) / (std::sqrt(area) *
                                      (std::sqrt(speed_sqd) + speed_of_sound));
   }
+#ifdef GEM_FORGE
+  m5_work_end(0, 0);
+#endif
 }
 
 void compute_flux(uint64_t nelr, int *elements_surrounding_elements,
                   double *normals, double *variables, double *fluxes) {
   const double smoothing_coefficient = double(0.2f);
 
+#ifdef GEM_FORGE
+  m5_work_begin(1, 0);
+#endif
 #pragma omp parallel for firstprivate(                                         \
     nelr, elements_surrounding_elements, normals, variables, fluxes,           \
     smoothing_coefficient, ff_variable, ff_flux_contribution_momentum_x,       \
@@ -345,31 +363,50 @@ void compute_flux(uint64_t nelr, int *elements_surrounding_elements,
     fluxes[i * NVAR + (VAR_MOMENTUM + 2)] = flux_i_momentum.z;
     fluxes[i * NVAR + VAR_DENSITY_ENERGY] = flux_i_density_energy;
   }
+#ifdef GEM_FORGE
+  m5_work_end(1, 0);
+#endif
 }
 
 void time_step(uint64_t j, uint64_t nelr, double *old_variables,
                double *variables, double *step_factors, double *fluxes) {
+#ifdef GEM_FORGE
+  m5_work_begin(2, 0);
+#endif
 #pragma omp parallel for firstprivate(j, nelr, old_variables, variables,       \
                                       step_factors, fluxes) default(none)      \
     schedule(static)
   for (uint64_t i = 0; i < nelr; i++) {
     double factor = step_factors[i] / double(RK + 1 - j);
 
-    variables[NVAR * i + VAR_DENSITY] = old_variables[NVAR * i + VAR_DENSITY] +
-                                        factor * fluxes[NVAR * i + VAR_DENSITY];
-    variables[NVAR * i + VAR_DENSITY_ENERGY] =
-        old_variables[NVAR * i + VAR_DENSITY_ENERGY] +
-        factor * fluxes[NVAR * i + VAR_DENSITY_ENERGY];
-    variables[NVAR * i + (VAR_MOMENTUM + 0)] =
-        old_variables[NVAR * i + (VAR_MOMENTUM + 0)] +
-        factor * fluxes[NVAR * i + (VAR_MOMENTUM + 0)];
-    variables[NVAR * i + (VAR_MOMENTUM + 1)] =
-        old_variables[NVAR * i + (VAR_MOMENTUM + 1)] +
-        factor * fluxes[NVAR * i + (VAR_MOMENTUM + 1)];
-    variables[NVAR * i + (VAR_MOMENTUM + 2)] =
-        old_variables[NVAR * i + (VAR_MOMENTUM + 2)] +
-        factor * fluxes[NVAR * i + (VAR_MOMENTUM + 2)];
+    uint64_t density_idx = NVAR * i + VAR_DENSITY;
+    uint64_t density_energy_idx = NVAR * i + VAR_DENSITY_ENERGY;
+    uint64_t momentum_x_idx = NVAR * i + (VAR_MOMENTUM + 0);
+    uint64_t momentum_y_idx = NVAR * i + (VAR_MOMENTUM + 1);
+    uint64_t momentum_z_idx = NVAR * i + (VAR_MOMENTUM + 2);
+
+    double old_density = old_variables[density_idx];
+    double old_density_energy = old_variables[density_energy_idx];
+    double old_momentum_x = old_variables[momentum_x_idx];
+    double old_momentum_y = old_variables[momentum_y_idx];
+    double old_momentum_z = old_variables[momentum_z_idx];
+
+    double flux_density = fluxes[density_idx];
+    double flux_density_energy = fluxes[density_energy_idx];
+    double flux_momentum_x = fluxes[momentum_x_idx];
+    double flux_momentum_y = fluxes[momentum_y_idx];
+    double flux_momentum_z = fluxes[momentum_z_idx];
+
+    variables[density_idx] = old_density + factor * flux_density;
+    variables[density_energy_idx] =
+        old_density_energy + factor * flux_density_energy;
+    variables[momentum_x_idx] = old_momentum_x + factor * flux_momentum_x;
+    variables[momentum_y_idx] = old_momentum_y + factor * flux_momentum_y;
+    variables[momentum_z_idx] = old_momentum_z + factor * flux_momentum_z;
   }
+#ifdef GEM_FORGE
+  m5_work_end(2, 0);
+#endif
 }
 /*
  * Main function
@@ -428,7 +465,7 @@ int main(int argc, char **argv) {
 
     auto infile = fopen(data_file_name, "rb");
     fread(&nel, sizeof(nel), 1, infile);
-    printf("Read in nel = %d.\n", nel);
+    printf("Read in nel = %d, numthreads = %d.\n", nel, num_threads);
 
     // Round nel up to num_threads
     nelr = num_threads * ((nel / num_threads) + std::min(1, nel % num_threads));
@@ -461,8 +498,6 @@ int main(int argc, char **argv) {
 
   // Create arrays and set initial conditions
   double *variables = alloc<double>(nelr * NVAR);
-  initialize_variables(nelr, variables);
-
   double *old_variables = alloc<double>(nelr * NVAR);
   double *fluxes = alloc<double>(nelr * NVAR);
   double *step_factors = alloc<double>(nelr);
@@ -471,6 +506,11 @@ int main(int argc, char **argv) {
   omp_set_dynamic(0);
   omp_set_num_threads(num_threads);
   omp_set_schedule(omp_sched_static, 0);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
+
+  initialize_variables(nelr, variables);
 
   // these need to be computed the first time in order to compute time step
   std::cout << "Starting..." << std::endl;

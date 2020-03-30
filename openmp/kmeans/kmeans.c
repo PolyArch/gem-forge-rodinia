@@ -69,8 +69,8 @@
  * **/
 /**					only regular k-means clustering.
  * **/
-/**					Simplified for main functionality: regular
- * k-means	**/
+/**					Simplified for main functionality:
+ * regular k-means	**/
 /**					clustering.
  * **/
 /**                                                                     **/
@@ -85,6 +85,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "kmeans.h"
 
@@ -113,16 +114,10 @@ int main(int argc, char **argv) {
   extern int optind;
   int nclusters = 5;
   char *filename = 0;
-  float *buf;
-  float **attributes;
-  float **cluster_centres = NULL;
   int i, j;
 
-  int numAttributes;
-  int numObjects;
   char line[1024];
   int isBinaryFile = 0;
-  int nloops = 1;
   float threshold = 0.001;
   double timing;
 
@@ -155,7 +150,9 @@ int main(int argc, char **argv) {
   if (filename == 0)
     usage(argv[0]);
 
-  numAttributes = numObjects = 0;
+  int numAttributes = 0;
+  int numObjects = 0;
+  float *attributes = NULL;
 
   /* from the input file, get the numAttributes and numObjects ------------*/
 
@@ -169,13 +166,8 @@ int main(int argc, char **argv) {
     read(infile, &numAttributes, sizeof(int));
 
     /* allocate space for attributes[] and read attributes of all objects */
-    buf = (float *)malloc(numObjects * numAttributes * sizeof(float));
-    attributes = (float **)malloc(numObjects * sizeof(float *));
-    attributes[0] = (float *)malloc(numObjects * numAttributes * sizeof(float));
-    for (i = 1; i < numObjects; i++)
-      attributes[i] = attributes[i - 1] + numAttributes;
-
-    read(infile, buf, numObjects * numAttributes * sizeof(float));
+    attributes = (float *)malloc(numObjects * numAttributes * sizeof(float));
+    read(infile, attributes, numObjects * numAttributes * sizeof(float));
 
     close(infile);
   } else {
@@ -198,18 +190,14 @@ int main(int argc, char **argv) {
     }
 
     /* allocate space for attributes[] and read attributes of all objects */
-    buf = (float *)malloc(numObjects * numAttributes * sizeof(float));
-    attributes = (float **)malloc(numObjects * sizeof(float *));
-    attributes[0] = (float *)malloc(numObjects * numAttributes * sizeof(float));
-    for (i = 1; i < numObjects; i++)
-      attributes[i] = attributes[i - 1] + numAttributes;
+    attributes = (float *)malloc(numObjects * numAttributes * sizeof(float));
     rewind(infile);
     i = 0;
     while (fgets(line, 1024, infile) != NULL) {
       if (strtok(line, " \t\n") == NULL)
         continue;
       for (j = 0; j < numAttributes; j++) {
-        buf[i] = atof(strtok(NULL, " ,\t\n"));
+        attributes[i] = atof(strtok(NULL, " ,\t\n"));
         i++;
       }
     }
@@ -217,37 +205,18 @@ int main(int argc, char **argv) {
   }
   printf("I/O completed\n");
 
-  memcpy(attributes[0], buf, numObjects * numAttributes * sizeof(float));
-
   timing = omp_get_wtime();
-  for (i = 0; i < nloops; i++) {
-
-    cluster_centres = NULL;
-    cluster(numObjects, numAttributes,
-            attributes, /* [numObjects][numAttributes] */
-            nclusters, threshold, &cluster_centres);
-  }
+  float *cluster_centres = NULL;
+  cluster(numObjects, numAttributes,
+          attributes, /* [numObjects][numAttributes] */
+          nclusters, threshold, &cluster_centres);
   timing = omp_get_wtime() - timing;
 
   printf("number of Clusters %d\n", nclusters);
   printf("number of Attributes %d\n\n", numAttributes);
-  /*  	printf("Cluster Centers Output\n");
-        printf("The first number is cluster number and the following data is
-    arribute value\n");
-        printf("=============================================================================\n\n");
-
-    for (i=0; i< nclusters; i++) {
-                printf("%d: ", i);
-        for (j=0; j<numAttributes; j++)
-            printf("%.2f ", cluster_centres[i][j]);
-        printf("\n\n");
-    }
-*/
   printf("Time for process: %f\n", timing);
 
   free(attributes);
-  free(cluster_centres[0]);
   free(cluster_centres);
-  free(buf);
   return (0);
 }

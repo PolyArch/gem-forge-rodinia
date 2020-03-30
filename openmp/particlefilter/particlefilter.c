@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -293,11 +294,11 @@ double calcLikelihoodSum(int *I, int *ind, int numOnes) {
  * last index
  */
 int findIndex(double *CDF, int lengthCDF, double value) {
-  uint64_t index = lengthCDF - 1;
-  for (uint64_t x = 0; x < lengthCDF; x++) {
-    index = x;
-    if (CDF[x] >= value) {
-      break;
+  uint64_t index = 0;
+  for (uint64_t x = 1; x < lengthCDF; x++) {
+    double curr = CDF[x];
+    if (curr >= value && index == 0) {
+      index = x;
     }
   }
   return index;
@@ -428,6 +429,7 @@ __attribute__((noinline)) void computeLikelihood(KernelArgs args) {
      */
     int xValue = roundDouble(arrayX[x]);
     int yValue = roundDouble(arrayY[x]);
+    double likelihoodValue = 0.0;
 #pragma clang loop vectorize(disable)
     for (uint64_t y = 0; y < countOnes; y++) {
       int indX = xValue + objxy[y * 2 + 1];
@@ -436,12 +438,7 @@ __attribute__((noinline)) void computeLikelihood(KernelArgs args) {
       if (indValue >= max_size) {
         indValue = 0;
       }
-      uint64_t pos = x * countOnes + y;
-      ind[pos] = indValue;
-    }
-    double likelihoodValue = 0.0;
-    for (uint64_t y = 0; y < countOnes; y++) {
-      int IValue = I[ind[x * countOnes + y]];
+      int IValue = I[indValue];
       likelihoodValue +=
           (pow((IValue - 100), 2) - pow((IValue - 228), 2)) / 50.0;
     }
@@ -553,12 +550,22 @@ __attribute__((noinline)) void resampleParticles(KernelArgs args) {
 #ifdef GEM_FORGE
   m5_work_begin(7, 0);
 #endif
+/**
+ * To save simulation time, I have decided to reduce the sample number.
+ * The simulation time will be adjusted later when processing the results.
+ */
+#define REDUCE_RESAMPLE 16
 #pragma omp parallel for firstprivate(CDF, Nparticles, xj, yj, u, arrayX,      \
                                       arrayY)
-  for (uint64_t j = 0; j < Nparticles; j++) {
+  for (uint64_t j = 0; j < Nparticles; j += REDUCE_RESAMPLE) {
     int i = findIndex(CDF, Nparticles, u[j]);
-    xj[j] = arrayX[i];
-    yj[j] = arrayY[i];
+    double resampledX = arrayX[i];
+    double resampledY = arrayY[i];
+    for (uint64_t k = 0; k < REDUCE_RESAMPLE; ++k) {
+      uint64_t idx = j + k;
+      xj[idx] = resampledX;
+      yj[idx] = resampledY;
+    }
   }
 #ifdef GEM_FORGE
   m5_work_end(7, 0);
@@ -601,6 +608,10 @@ __attribute__((noinline)) void resampleParticles(KernelArgs args) {
 void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
                     int Nparticles, int Nthreads) {
 
+  omp_set_num_threads(Nthreads);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
   int max_size = IszX * IszY * Nfr;
   // original particle centroid
   double xe = roundDouble(IszY / 2.0);
@@ -624,7 +635,6 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
 
   // initial weights are all equal (1/Nparticles)
   double *weights = (double *)malloc(sizeof(double) * Nparticles);
-#pragma omp parallel for shared(weights, Nparticles) private(x)
   for (x = 0; x < Nparticles; x++) {
     weights[x] = 1 / ((double)(Nparticles));
   }
@@ -637,7 +647,6 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
   double *CDF = (double *)malloc(sizeof(double) * Nparticles);
   double *u = (double *)malloc(sizeof(double) * Nparticles);
   int *ind = (int *)malloc(sizeof(int) * countOnes * Nparticles);
-#pragma omp parallel for shared(arrayX, arrayY, xe, ye) private(x)
   for (x = 0; x < Nparticles; x++) {
     arrayX[x] = xe;
     arrayY[x] = ye;
@@ -700,7 +709,6 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
 
 #ifdef GEM_FORGE
   omp_set_dynamic(0);
-  omp_set_num_threads(Nthreads);
   omp_set_schedule(omp_sched_static, 0);
   m5_detail_sim_start();
 
@@ -719,8 +727,13 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
   for (uint64_t i = 0; i < countOnes * 2 * sizeof(double); i += 64) {
     VOLATILE_LOAD(objxy, i);
   }
+  // Here we start the threads.
   for (uint64_t i = 0; i < countOnes * Nparticles * sizeof(int); i += 64) {
     VOLATILE_LOAD(ind, i);
+  }
+#pragma omp parallel for schedule(static)
+  for (int i = 0; i < Nthreads; ++i) {
+    printf("Start thread %d.\n", i);
   }
 #undef VOLATILE_LOAD
   m5_reset_stats(0, 0);
@@ -813,6 +826,10 @@ int main(int argc, char *argv[]) {
 
   if (Nparticles <= 0) {
     printf("Number of particles must be > 0\n");
+    return 0;
+  }
+  if ((Nparticles % REDUCE_RESAMPLE) != 0) {
+    printf("Number of particles must be multiple of %d\n", REDUCE_RESAMPLE);
     return 0;
   }
   // establish seed

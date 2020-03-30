@@ -1,1 +1,1 @@
-./particle_filter -x 128 -y 128 -z 10 -np 32768 -nt 4
+./particlefilter.exe -x 128 -y 128 -z 10 -np 32768 -nt 4

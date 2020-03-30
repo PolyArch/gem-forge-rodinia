@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -267,6 +268,9 @@ int main(int argc, char **argv) {
   printf("Start computing the transient temperature\n");
 
   omp_set_num_threads(num_omp_threads);
+#ifdef GEM_FORGE
+  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
 
   compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);
   /* cleanup	*/
