@@ -260,7 +260,6 @@ void videoSequence(int *I, int IszX, int IszY, int Nfr, int *seed) {
     }
   }
   free(newMatrix);
-
   /*define background, add noise*/
   setIf(0, 100, I, &IszX, &IszY, &Nfr);
   setIf(1, 228, I, &IszX, &IszY, &Nfr);

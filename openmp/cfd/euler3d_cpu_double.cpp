@@ -41,7 +41,6 @@ struct double3 {
  * Generic functions
  */
 template <typename T> T *alloc(int N) { return new T[N]; }
-
 template <typename T> void dealloc(T *array) { delete[] array; }
 
 template <typename T> void copy(T *dst, T *src, int N) {
@@ -367,7 +366,6 @@ void compute_flux(uint64_t nelr, int *elements_surrounding_elements,
   m5_work_end(1, 0);
 #endif
 }
-
 void time_step(uint64_t j, uint64_t nelr, double *old_variables,
                double *variables, double *step_factors, double *fluxes) {
 #ifdef GEM_FORGE
@@ -378,6 +376,7 @@ void time_step(uint64_t j, uint64_t nelr, double *old_variables,
     schedule(static)
   for (uint64_t i = 0; i < nelr; i++) {
     double factor = step_factors[i] / double(RK + 1 - j);
+
 
     uint64_t density_idx = NVAR * i + VAR_DENSITY;
     uint64_t density_energy_idx = NVAR * i + VAR_DENSITY_ENERGY;

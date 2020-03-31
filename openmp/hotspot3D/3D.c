@@ -126,7 +126,6 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
   ce = cw = stepDivCap / Rx;
   cn = cs = stepDivCap / Ry;
   ct = cb = stepDivCap / Rz;
-
   cc = 1.0 - (2.0 * ce + 2.0 * cn + 3.0 * ct);
 
   {

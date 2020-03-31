@@ -74,6 +74,9 @@ void kernel_range(int cores_arg, knode *knodes, long knodes_elem, int order,
       lhsKnode = &knodes[lhsKnode->indices[nextLHSKnodeId]];
       rhsKnode = &knodes[rhsKnode->indices[nextRHSKnodeId]];
     }
+     
+    
+
 
     // process leaves
     uint64_t startRecId = UINT64_MAX;

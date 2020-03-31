@@ -65,7 +65,6 @@ void init(int argc, char **argv) {
 }
 
 void fatal(char *s) { fprintf(stderr, "error: %s\n", s); }
-
 #define IN_RANGE(x, min, max) ((x) >= (min) && (x) <= (max))
 #define CLAMP_RANGE(x, min, max) x = (x < (min)) ? min : ((x > (max)) ? max : x)
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
