@@ -220,7 +220,7 @@ void runTest(int argc, char **argv) {
   }
   omp_set_num_threads(omp_num_threads);
 #ifdef GEM_FORGE
-  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
   printf("Num of threads: %d\n", omp_get_num_threads());
   printf("Processing top-left matrix\n");

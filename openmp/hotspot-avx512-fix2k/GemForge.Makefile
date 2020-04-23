@@ -8,7 +8,7 @@ all: bfs.exe
 riscv: raw.riscv.exe
 
 hotspot.bc: hotspot.cpp
-	$(CC) $(CC_FLAGS) -DGEM_FORGE_FIX_INPUT -DGEM_FORGE_FIX_INPUT_SIZE=1024 -march=knl $^ -emit-llvm -c -o $@
+	$(CC) $(CC_FLAGS) -DGEM_FORGE_FIX_INPUT -DGEM_FORGE_FIX_INPUT_SIZE=2048 -march=knl $^ -emit-llvm -c -o $@
 
 raw.bc: hotspot.bc
 	llvm-link $^ -o $@

@@ -270,7 +270,7 @@ int main(int argc, char **argv) {
 
   omp_set_num_threads(cores_arg);
 #ifdef GEM_FORGE
-  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
 
   printf("nthreads = %d.\n", cores_arg);
