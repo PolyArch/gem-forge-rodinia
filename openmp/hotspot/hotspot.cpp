@@ -1,9 +1,9 @@
+#include <malloc.h>
 #include <omp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
-#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -65,10 +65,10 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
      */
 #ifdef GEM_FORGE_FIX_INPUT
 #pragma omp simd
-    for (uint64_t c = 0; c < 1024; ++c) {
-      uint64_t idx = r * 1024 + c;
-      uint64_t idxS = idx + 1024;
-      uint64_t idxN = idx - 1024;
+    for (uint64_t c = 0; c < GEM_FORGE_FIX_INPUT_SIZE; ++c) {
+      uint64_t idx = r * GEM_FORGE_FIX_INPUT_SIZE + c;
+      uint64_t idxS = idx + GEM_FORGE_FIX_INPUT_SIZE;
+      uint64_t idxN = idx - GEM_FORGE_FIX_INPUT_SIZE;
 #else
 #pragma omp simd
     for (uint64_t c = 0; c < col; ++c) {
@@ -247,6 +247,13 @@ int main(int argc, char **argv) {
       (sim_time = atoi(argv[3])) <= 0 || (num_omp_threads = atoi(argv[4])) <= 0)
     usage(argc, argv);
 
+#ifdef GEM_FORGE_FIX_INPUT
+  if (grid_cols != GEM_FORGE_FIX_INPUT_SIZE) {
+    printf("Input size mismatch, fixed %d.\n", GEM_FORGE_FIX_INPUT_SIZE);
+    exit(1);
+  }
+#endif
+
   /* allocate memory for the temperature and power arrays	*/
   temp = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
   power = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
@@ -255,6 +262,8 @@ int main(int argc, char **argv) {
     printf("unable to allocate memory");
     exit(1);
   }
+  printf("Size of array %dMB.\n",
+         3 * grid_rows * grid_cols * sizeof(FLOAT) / 1024 / 1024);
 
   /* read initial temperatures and input power	*/
   tfile = argv[5];
@@ -268,7 +277,7 @@ int main(int argc, char **argv) {
 
   omp_set_num_threads(num_omp_threads);
 #ifdef GEM_FORGE
-  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
 
   compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);

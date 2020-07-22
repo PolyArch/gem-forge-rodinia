@@ -506,7 +506,7 @@ int main(int argc, char **argv) {
   omp_set_num_threads(num_threads);
   omp_set_schedule(omp_sched_static, 0);
 #ifdef GEM_FORGE
-  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
 
   initialize_variables(nelr, variables);

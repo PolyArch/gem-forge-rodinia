@@ -38,8 +38,8 @@ void init(int argc, char **argv) {
     printf("Usage: pathfiner width num_of_steps num_of_threads\n");
     exit(0);
   }
-  wall = new int[rows * cols];
-  result = new int[cols + 2];
+  wall = reinterpret_cast<int *>(aligned_alloc(64, rows * cols * sizeof(int)));
+  result = reinterpret_cast<int *>(aligned_alloc(64, (cols + 2) * sizeof(int)));
 
   int seed = M_SEED;
   srand(seed);
@@ -111,7 +111,7 @@ void run(int argc, char **argv) {
   int min;
 
   dst = result;
-  src = new int[cols + 2];
+  src = reinterpret_cast<int *>(aligned_alloc(64, (cols + 2) * sizeof(int)));
 
   pin_stats_reset();
 
@@ -120,7 +120,7 @@ void run(int argc, char **argv) {
   omp_set_num_threads(num_threads);
   omp_set_schedule(omp_sched_static, 0);
 #ifdef GEM_FORGE
-  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
 
 #ifdef GEM_FORGE
@@ -135,12 +135,17 @@ void run(int argc, char **argv) {
  */
 #ifdef GEM_FORGE_WARM_CACHE
   for (int t = 0; t < rows; ++t) {
-#pragma omp parallel for firstprivate(t, cols, wall, src, dst) schedule(static)
     for (int n = 0; n < cols; n += (64 / sizeof(int))) {
       volatile int v = wall[t * cols + n];
-      volatile int vs = src[n];
-      volatile int vd = dst[n];
     }
+  }
+  for (int n = 0; n < cols; n += (64 / sizeof(int))) {
+    volatile int vs = src[n];
+    volatile int vd = dst[n];
+  }
+#pragma omp parallel for firstprivate(wall) schedule(static)
+  for (int n = 0; n < num_threads; n++) {
+    volatile int v = wall[n];
   }
 #endif
   m5_reset_stats(0, 0);
@@ -172,8 +177,7 @@ void run(int argc, char **argv) {
 
 #endif
 
-  delete[] data;
-  delete[] wall;
-  delete[] dst;
-  delete[] src;
+  free(wall);
+  free(dst);
+  free(src);
 }
