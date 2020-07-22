@@ -31,7 +31,6 @@ void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
 #ifdef GEM_FORGE
     m5_work_begin(0, 0);
 #endif
-
 #pragma omp parallel for firstprivate(nNodes, masks, nodes, edges, visits,     \
                                       costs, updates, k) schedule(static)
     for (uint64_t tid = 0; tid < nNodes; tid++) {

@@ -55,7 +55,6 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
 #ifdef GEM_FORGE
   m5_work_begin(0, 0);
 #endif
-
 #ifndef BLOCKED
 #pragma omp parallel for shared(power, temp, result)                           \
     firstprivate(row, col, Cap_1, Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)

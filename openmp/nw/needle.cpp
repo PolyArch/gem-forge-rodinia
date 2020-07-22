@@ -103,7 +103,6 @@ void nw_optimized(int *input_itemsets, int *referrence, uint64_t max_rows,
           uint64_t idxNW = idx - nCols - 1;
           uint64_t idxN = idx - nCols;
           uint64_t idxW = idx - 1;
-
           int ref = referrence[idx];
           int inputNW = input_itemsets[idxNW];
           int inputW = input_itemsets[idxW];

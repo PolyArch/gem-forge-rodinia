@@ -184,7 +184,6 @@ void process(FILE *flist, struct Neighbor *neighbors,
     m5_work_end(0, 0);
     m5_work_begin(1, 0);
 #endif
-
 #pragma omp parallel for firstprivate(z, target_lat, target_long, rec_count)   \
     schedule(static)
     for (int64_t i = 0; i < rec_count; i++) {

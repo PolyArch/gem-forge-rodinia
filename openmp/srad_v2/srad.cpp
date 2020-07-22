@@ -175,7 +175,6 @@ int main(int argc, char *argv[]) {
         // saturate diffusion coefficent
         // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
         c[k] = cValue;
-
         // uint64_t dk = i * cols * 4 + j * 4;
         // delta[dk + 0] = dNValue;
         // delta[dk + 1] = dSValue;
@@ -204,17 +203,13 @@ int main(int argc, char *argv[]) {
         uint64_t k = i * cols + j;
         uint64_t kS = k + cols;
 #endif
-        /**
-         * ! Accessing j + 1.
-         * Out of bound.
-         */
-
+         // ! Accessing j + 1.
+         // Out of bound.
         // diffusion coefficent
         float cN = c[k];
         float cS = c[kS];
         float cW = cN;
         float cE = c[k + 1];
-
         // divergence (equ 58)
         float dNValue = deltaN[k];
         float dSValue = deltaS[k];
