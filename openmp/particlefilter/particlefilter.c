@@ -609,7 +609,7 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
 
   omp_set_num_threads(Nthreads);
 #ifdef GEM_FORGE
-  mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
   int max_size = IszX * IszY * Nfr;
   // original particle centroid

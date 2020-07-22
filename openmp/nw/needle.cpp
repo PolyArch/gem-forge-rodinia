@@ -240,7 +240,7 @@ void runTest(int argc, char **argv) {
   // Start the threads.
 #pragma omp parallel for schedule(static) shared(input_itemsets, referrence)
   for (int i = 0; i < omp_num_threads; ++i) {
-    printf("Start thread %d.\n", i);
+    volatile int vi = input_itemsets[i];
   }
   m5_reset_stats(0, 0);
 #endif
