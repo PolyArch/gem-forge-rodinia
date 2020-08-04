@@ -34,11 +34,11 @@ void bfs(int nNodes, int nEdges, Node *nodes, int *edges, int *costs,
 #pragma omp parallel for firstprivate(nNodes, masks, nodes, edges, visits,     \
                                       costs, updates, k) schedule(static)
     for (uint64_t tid = 0; tid < nNodes; tid++) {
+      uint64_t start = nodes[tid].starting;
+      uint64_t end = nodes[tid].no_of_edges + start;
       bool mask = masks[tid];
       masks[tid] = false;
-      if (mask) {
-        uint64_t start = nodes[tid].starting;
-        uint64_t end = nodes[tid].no_of_edges + start;
+      if (start < end && mask) {
 #pragma clang loop vectorize(disable) unroll(disable)
         for (uint64_t i = start; i < end; i++) {
           uint64_t id = edges[i];
