@@ -1,6 +1,6 @@
 
 # We disable loop-unswitch to avoid multiple loops.
-CC_FLAGS += -gline-tables-only -fopenmp -O3 -I${LLVM_TRACE_CPU_PATH}/include -DGEM_FORGE -DGEM_FORGE_WARM_CACHE -DGEM_FORGE_MALLOC_ARENA_MAX=2 -mllvm -loop-unswitch-threshold=1 -Rpass-analysis=loop-vectorize
+CC_FLAGS += -gline-tables-only -fopenmp -O3 -I${GEM_FORGE_TOP}/gem5/include -DGEM_FORGE -DGEM_FORGE_WARM_CACHE -DGEM_FORGE_MALLOC_ARENA_MAX=2 -mllvm -loop-unswitch-threshold=1 -Rpass-analysis=loop-vectorize
 
 RISCV_INSTALL=/home/zhengrong/Documents/riscv/install
 RISCV_SYSROOT=${RISCV_INSTALL}/sysroot

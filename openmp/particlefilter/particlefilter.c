@@ -4,6 +4,7 @@
  * @brief Particle filter implementation in C/OpenMP
  */
 #include <limits.h>
+#include <malloc.h>
 #include <math.h>
 #include <omp.h>
 #include <stdint.h>
@@ -12,7 +13,6 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
-#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -710,6 +710,7 @@ void particleFilter(int *I, int IszX, int IszY, int Nfr, int *seed,
   omp_set_dynamic(0);
   omp_set_schedule(omp_sched_static, 0);
   m5_detail_sim_start();
+  printf("VAddr of arrayX %p arrayY %p weights %p.\n", arrayX, arrayY, weights);
 
 #ifdef GEM_FORGE_WARM_CACHE
 #define VOLATILE_LOAD(x, i) volatile uint8_t x##V = ((uint8_t *)x)[i];
