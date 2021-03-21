@@ -44,10 +44,7 @@ using namespace std;
 #define ITER 3 // iterate ITER* k log k times; ITER >= 1
 
 //#define PRINTINFO //comment this out to disable output
-#define PROFILE // comment this out to disable instrumentation code
-//#define ENABLE_THREADS  // comment this out to disable threads
-//#define INSERT_WASTE //uncomment this to insert waste computation into dist
-// function
+// #define PROFILE // comment this out to disable instrumentation code
 
 #define CACHE_LINE 512 // cache line in byte. Zhengrong: ?? What is this.
 
@@ -67,6 +64,7 @@ typedef struct {
   long num; /* number of points; may not be N if this is a sample */
   int dim;  /* dimensionality */
   Point *p; /* the array itself */
+  float *coordiates;
 } Points;
 
 static bool *switch_membership; // whether to switch membership in pgain
@@ -163,25 +161,11 @@ void intshuffle(int *intarray, int length) {
 #endif
 }
 
-#ifdef INSERT_WASTE
-double waste(double s) {
-  for (int i = 0; i < 4; i++) {
-    s += pow(s, 0.78);
-  }
-  return s;
-}
-#endif
-
 /* compute Euclidean distance squared between two points */
-float dist(Point p1, Point p2, int dim) {
+float compute_dist(float *p1, float *p2, int dim) {
   float result = 0.0;
   for (int i = 0; i < dim; i++)
-    result += (p1.coord[i] - p2.coord[i]) * (p1.coord[i] - p2.coord[i]);
-#ifdef INSERT_WASTE
-  double s = waste(result);
-  result += s;
-  result -= s;
-#endif
+    result += (p1[i] - p2[i]) * (p1[i] - p2[i]);
   return (result);
 }
 
@@ -196,6 +180,9 @@ float pspeedy(Points *points, float z, long *kcenter) {
   long k1 = 0;
   long k2 = points->num;
 
+  float *pos = points->coordiates;
+  const int dim = points->dim;
+
   static double totalcost;
 
   static bool open = false;
@@ -208,7 +195,7 @@ float pspeedy(Points *points, float z, long *kcenter) {
 
   /* create center at first point, send it to itself */
   for (int k = k1; k < k2; k++) {
-    float distance = dist(points->p[k], points->p[0], points->dim);
+    float distance = compute_dist(pos + k * dim, pos, dim);
     points->p[k].cost = distance * points->p[k].weight;
     points->p[k].assign = 0;
   }
@@ -224,7 +211,7 @@ float pspeedy(Points *points, float z, long *kcenter) {
         (*kcenter)++;
         open = true;
         for (int k = k1; k < k2; k++) {
-          float distance = dist(points->p[i], points->p[k], points->dim);
+          float distance = compute_dist(pos + i * dim, pos + k * dim, dim);
           if (distance * points->p[k].weight < points->p[k].cost) {
             points->p[k].cost = distance * points->p[k].weight;
             points->p[k].assign = i;
@@ -285,7 +272,6 @@ double pgain(long x, Points *points, double z, long int *numcenters) {
   long k1 = 0;
   long k2 = points->num;
 
-  int i;
   int number_of_centers_to_close = 0;
 
   static double *work_mem;
@@ -349,15 +335,20 @@ double pgain(long x, Points *points, double z, long int *numcenters) {
   // global *lower* fields
   double *gl_lower = &work_mem[nproc * stride];
 
+  float *pos = points->coordiates;
+  const int dim = points->dim;
+
+#ifdef GEM_FORGE
+  m5_work_begin(0, 0);
+#endif
   // OpenMP parallelization
-#pragma omp parallel for reduction(+ : cost_of_opening_x)
-  for (i = k1; i < k2; i++) {
-    float x_cost =
-        dist(points->p[i], points->p[x], points->dim) * points->p[i].weight;
+#pragma omp parallel for reduction(+ : cost_of_opening_x) firstprivate(pos, dim)
+  for (int64_t i = k1; i < k2; i++) {
+    float distance = compute_dist(pos + i * dim, pos + x * dim, dim);
+    float x_cost = distance * points->p[i].weight;
     float current_cost = points->p[i].cost;
 
     if (x_cost < current_cost) {
-
       // point i would save cost just by switching to x
       // (note that i cannot be a median,
       // or else dist(p[i], p[x]) would be 0)
@@ -376,6 +367,9 @@ double pgain(long x, Points *points, double z, long int *numcenters) {
       lower[center_table[assign]] += current_cost - x_cost;
     }
   }
+#ifdef GEM_FORGE
+  m5_work_begin(0, 0);
+#endif
 
 #ifdef PROFILE
   double t2 = gettime();
@@ -421,14 +415,14 @@ double pgain(long x, Points *points, double z, long int *numcenters) {
 
   if (gl_cost_of_opening_x < 0) {
     //  we'd save money by opening x; we'll do it
-#pragma omp parallel for
+#pragma omp parallel for firstprivate(pos, dim)
     for (int i = k1; i < k2; i++) {
       bool close_center = gl_lower[center_table[points->p[i].assign]] > 0;
       if (switch_membership[i] || close_center) {
         // Either i's median (which may be i itself) is closing,
         // or i is closer to x than to its current median
-        points->p[i].cost =
-            points->p[i].weight * dist(points->p[i], points->p[x], points->dim);
+        float distance = compute_dist(pos + i * dim, pos + x * dim, dim);
+        points->p[i].cost = points->p[i].weight * distance;
         points->p[i].assign = x;
       }
     }
@@ -585,12 +579,14 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid) {
     hizs = (double *)calloc(nproc, sizeof(double));
   hiz = loz = 0.0;
   long numberOfPoints = points->num;
-  long ptDimension = points->dim;
 
   // my block
   long k1 = 0;
   long k2 = points->num;
   long bsize = points->num;
+
+  float *pos = points->coordiates;
+  const int dim = points->dim;
 
 #ifdef PRINTINFO
   if (pid == 0) {
@@ -601,8 +597,8 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid) {
 
   double myhiz = 0;
   for (long kk = k1; kk < k2; kk++) {
-    myhiz +=
-        dist(points->p[kk], points->p[0], ptDimension) * points->p[kk].weight;
+    float distance = compute_dist(pos + kk * dim, pos, dim);
+    myhiz += distance * points->p[kk].weight;
   }
   hizs[pid] = myhiz;
 
@@ -895,7 +891,9 @@ void stream_cluster(PStream *stream, long kmin, long kmax, int dim,
   Points points;
   points.dim = dim;
   points.num = chunksize;
-  points.p = (Point *)malloc(chunksize * sizeof(Point));
+  points.p =
+      (Point *)aligned_alloc(CACHE_LINE_BYTES, chunksize * sizeof(Point));
+  points.coordiates = block;
   for (int i = 0; i < chunksize; i++) {
     points.p[i].coord = &block[i * dim];
   }
@@ -904,6 +902,7 @@ void stream_cluster(PStream *stream, long kmin, long kmax, int dim,
   centers.dim = dim;
   centers.p = (Point *)malloc(centersize * sizeof(Point));
   centers.num = 0;
+  centers.coordiates = centerBlock;
 
   for (int i = 0; i < centersize; i++) {
     centers.p[i].coord = &centerBlock[i * dim];
@@ -928,13 +927,7 @@ void stream_cluster(PStream *stream, long kmin, long kmax, int dim,
     is_center = (bool *)calloc(points.num, sizeof(bool));
     center_table = (int *)malloc(points.num * sizeof(int));
 
-#ifdef GEM_FORGE
-    m5_work_begin(0, 0);
-#endif
     localSearch(&points, kmin, kmax, &kfinal);
-#ifdef GEM_FORGE
-    m5_work_end(0, 0);
-#endif
 
     fprintf(stderr, "finish local search\n");
     contcenters(&points);
@@ -1050,6 +1043,7 @@ int main(int argc, char **argv) {
 
   printf("time = %lf\n", t2 - t1);
 
+#ifdef PROFILE
   printf("time pgain = %lf\n", time_gain);
   printf("time pgain_dist = %lf\n", time_gain_dist);
   printf("time pgain_init = %lf\n", time_gain_init);
@@ -1058,6 +1052,7 @@ int main(int argc, char **argv) {
   printf("time pshuffle = %lf\n", time_shuffle);
   printf("time localSearch = %lf\n", time_local_search);
   printf("Num iterations = %d\n", num_iteration);
+#endif
 
   delete stream;
   return 0;
