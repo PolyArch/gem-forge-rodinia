@@ -10,6 +10,8 @@
         Department of Electrical and Computer Engineering
         Department of Computer Science
 
+        - adapted to GemForge by Zhengrong Wang (seanzw@ucla.edu)
+
 ***********************************************/
 
 #include <assert.h>
@@ -24,8 +26,8 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 
-#ifdef ENABLE_PARSEC_HOOKS
-#include <hooks.h>
+#ifdef GEM_FORGE
+#include "gem5/m5ops.h"
 #endif
 
 using namespace std;
@@ -45,9 +47,11 @@ using namespace std;
 #define PROFILE // comment this out to disable instrumentation code
 //#define ENABLE_THREADS  // comment this out to disable threads
 //#define INSERT_WASTE //uncomment this to insert waste computation into dist
-//function
+// function
 
-#define CACHE_LINE 512 // cache line in byte
+#define CACHE_LINE 512 // cache line in byte. Zhengrong: ?? What is this.
+
+#define CACHE_LINE_BYTES 64 // cache line in byte.
 
 /* this structure represents a point */
 /* these will be passed around to avoid copying coordinates */
@@ -170,9 +174,8 @@ double waste(double s) {
 
 /* compute Euclidean distance squared between two points */
 float dist(Point p1, Point p2, int dim) {
-  int i;
   float result = 0.0;
-  for (i = 0; i < dim; i++)
+  for (int i = 0; i < dim; i++)
     result += (p1.coord[i] - p2.coord[i]) * (p1.coord[i] - p2.coord[i]);
 #ifdef INSERT_WASTE
   double s = waste(result);
@@ -449,7 +452,6 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
   double *gl_lower = &work_mem[nproc * stride];
 
   // OpenMP parallelization
-  //	#pragma omp parallel for
 #pragma omp parallel for reduction(+ : cost_of_opening_x)
   for (i = k1; i < k2; i++) {
     float x_cost =
@@ -1086,7 +1088,7 @@ void outcenterIDs(Points *centers, long *centerIDs, char *outfile) {
 
   for (int i = 0; i < centers->num; i++) {
     if (is_a_median[i]) {
-      fprintf(fp, "%u\n", centerIDs[i]);
+      fprintf(fp, "%ld\n", centerIDs[i]);
       fprintf(fp, "%lf\n", centers->p[i].weight);
       for (int k = 0; k < centers->dim; k++) {
         fprintf(fp, "%lf ", centers->p[i].coord[k]);
@@ -1097,16 +1099,16 @@ void outcenterIDs(Points *centers, long *centerIDs, char *outfile) {
   fclose(fp);
 }
 
-void streamCluster(PStream *stream, long kmin, long kmax, int dim,
-                   long chunksize, long centersize, char *outfile) {
-  block = (float *)malloc(chunksize * dim * sizeof(float));
-  float *centerBlock = (float *)malloc(centersize * dim * sizeof(float));
-  long *centerIDs = (long *)malloc(centersize * dim * sizeof(long));
+void stream_cluster(PStream *stream, long kmin, long kmax, int dim,
+                    long chunksize, long centersize, char *outfile) {
+  block =
+      (float *)aligned_alloc(CACHE_LINE_BYTES, chunksize * dim * sizeof(float));
+  float *centerBlock = (float *)aligned_alloc(CACHE_LINE_BYTES,
+                                              centersize * dim * sizeof(float));
+  long *centerIDs =
+      (long *)aligned_alloc(CACHE_LINE_BYTES, centersize * dim * sizeof(long));
 
-  if (block == NULL) {
-    fprintf(stderr, "not enough memory for a chunk!\n");
-    exit(1);
-  }
+  assert(block != NULL && "Out of memory.");
 
   Points points;
   points.dim = dim;
@@ -1131,13 +1133,9 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   while (1) {
 
     size_t numRead = stream->read(block, dim, chunksize);
-    fprintf(stderr, "read %d points\n", numRead);
 
-    if (stream->ferror() ||
-        numRead < (unsigned int)chunksize && !stream->feof()) {
-      fprintf(stderr, "error reading data!\n");
-      exit(1);
-    }
+    assert(!(stream->ferror() ||
+             numRead < (unsigned int)chunksize && !stream->feof()));
 
     points.num = numRead;
     for (int i = 0; i < points.num; i++) {
@@ -1148,7 +1146,13 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
     is_center = (bool *)calloc(points.num, sizeof(bool));
     center_table = (int *)malloc(points.num * sizeof(int));
 
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
+#endif
     localSearch(&points, kmin, kmax, &kfinal);
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+#endif
 
     fprintf(stderr, "finish local search\n");
     contcenters(&points);
@@ -1191,24 +1195,8 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
 int main(int argc, char **argv) {
   char *outfilename = new char[MAXNAMESIZE];
   char *infilename = new char[MAXNAMESIZE];
-  long kmin, kmax, n, chunksize, clustersize;
-  int dim;
-  int numthreads;
   c = 0;
   d = 0;
-#ifdef PARSEC_VERSION
-#define __PARSEC_STRING(x) #x
-#define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
-  printf(
-      "PARSEC Benchmark Suite Version "__PARSEC_XSTRING(PARSEC_VERSION) "\n");
-  fflush(NULL);
-#else
-  printf("PARSEC Benchmark Suite\n");
-  fflush(NULL);
-#endif // PARSEC_VERSION
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_bench_begin(__parsec_streamcluster);
-#endif
 
   if (argc < 10) {
     fprintf(stderr,
@@ -1229,19 +1217,18 @@ int main(int argc, char **argv) {
                     "reading from infile.\n");
     exit(1);
   }
-  kmin = atoi(argv[1]);
-  kmax = atoi(argv[2]);
-  dim = atoi(argv[3]);
-  n = atoi(argv[4]);
-  chunksize = atoi(argv[5]);
-  clustersize = atoi(argv[6]);
+  long kmin = atoi(argv[1]);
+  long kmax = atoi(argv[2]);
+  int dim = atoi(argv[3]);
+  long n = atoi(argv[4]);
+  long chunksize = atoi(argv[5]);
+  long clustersize = atoi(argv[6]);
   strcpy(infilename, argv[7]);
   strcpy(outfilename, argv[8]);
   nproc = atoi(argv[9]);
 
   ompthreads = nproc;
   nproc = 1;
-  omp_set_num_threads(ompthreads);
 
   srand48(SEED);
   PStream *stream;
@@ -1253,19 +1240,36 @@ int main(int argc, char **argv) {
 
   double t1 = gettime();
 
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_roi_begin();
+  omp_set_dynamic(0);
+  omp_set_num_threads(ompthreads);
+  omp_set_schedule(omp_sched_static, 0);
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+
+/**
+ * Since there is no reuse, we don't have to warm up the cache.
+ * But here we initialize all the threads.
+ */
+#ifdef GEM_FORGE_WARM_CACHE
+#pragma omp parallel for schedule(static)
+  for (int n = 0; n < ompthreads; n++) {
+    volatile int v = ompthreads;
+  }
 #endif
-  streamCluster(stream, kmin, kmax, dim, chunksize, clustersize, outfilename);
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_roi_end();
+  m5_reset_stats(0, 0);
+#endif
+
+  stream_cluster(stream, kmin, kmax, dim, chunksize, clustersize, outfilename);
+
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
 #endif
 
   double t2 = gettime();
 
   printf("time = %lf\n", t2 - t1);
-
-  delete stream;
 
   printf("time pgain = %lf\n", time_gain);
   printf("time pgain_dist = %lf\n", time_gain_dist);
@@ -1275,9 +1279,7 @@ int main(int argc, char **argv) {
   printf("time pshuffle = %lf\n", time_shuffle);
   printf("time localSearch = %lf\n", time_local_search);
   printf("loops=%d\n", d);
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_bench_end();
-#endif
 
+  delete stream;
   return 0;
 }
