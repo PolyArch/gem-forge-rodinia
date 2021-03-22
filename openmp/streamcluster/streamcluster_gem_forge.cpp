@@ -190,6 +190,59 @@ float compute_dist(float *p1, float *p2, int dim) {
   return result;
 }
 
+__attribute__((noinline)) void pspeedy_assign_first(Points *points, long k1,
+                                                    long k2) {
+  /* create center at first point, send it to itself */
+  const int dim = points->dim;
+  float *p2 = points->p[0].coord;
+#ifdef GEM_FORGE_FIX_DIM_16
+  __m512 valX = _mm512_load_ps(p2);
+#endif
+
+  for (int64_t i = k1; i < k2; i++) {
+    float *p1 = points->p[i].coord;
+    float weight = points->p[i].weight;
+#ifdef GEM_FORGE_FIX_DIM_16
+    __m512 valI = _mm512_load_ps(p1);
+    __m512 valS = _mm512_sub_ps(valX, valI);
+    __m512 valM = _mm512_mul_ps(valS, valS);
+    float distance = _mm512_reduce_add_ps(valM);
+#else
+    float distance = compute_dist(p1, p2, dim);
+#endif
+    points->p[i].cost = distance * weight;
+    points->p[i].assign = 0;
+  }
+}
+
+__attribute__((noinline)) void pspeedy_assign_lower(Points *points, long k1,
+                                                    long k2, long target) {
+  // Assign the point to target if the cost is lower.
+  const int dim = points->dim;
+  float *p2 = points->p[target].coord;
+#ifdef GEM_FORGE_FIX_DIM_16
+  __m512 valX = _mm512_load_ps(p2);
+#endif
+
+  for (int64_t i = k1; i < k2; i++) {
+    float *p1 = points->p[i].coord;
+    float weight = points->p[i].weight;
+    float current_cost = points->p[i].cost;
+#ifdef GEM_FORGE_FIX_DIM_16
+    __m512 valI = _mm512_load_ps(p1);
+    __m512 valS = _mm512_sub_ps(valX, valI);
+    __m512 valM = _mm512_mul_ps(valS, valS);
+    float distance = _mm512_reduce_add_ps(valM);
+#else
+    float distance = compute_dist(p1, p2, dim);
+#endif
+    if (distance * weight < current_cost) {
+      points->p[i].cost = distance * weight;
+      points->p[i].assign = target;
+    }
+  }
+}
+
 /* run speedy on the points, return total cost of solution */
 float pspeedy(Points *points, float z, long *kcenter, int pid,
               pthread_barrier_t *barrier) {
@@ -225,11 +278,7 @@ float pspeedy(Points *points, float z, long *kcenter, int pid,
 #endif
 
   /* create center at first point, send it to itself */
-  for (int k = k1; k < k2; k++) {
-    float distance = dist(points->p[k], points->p[0], points->dim);
-    points->p[k].cost = distance * points->p[k].weight;
-    points->p[k].assign = 0;
-  }
+  pspeedy_assign_first(points, k1, k2);
 
   if (pid == 0) {
     *kcenter = 1;
@@ -247,13 +296,7 @@ float pspeedy(Points *points, float z, long *kcenter, int pid,
 #endif
       if (i >= points->num)
         break;
-      for (int k = k1; k < k2; k++) {
-        float distance = dist(points->p[i], points->p[k], points->dim);
-        if (distance * points->p[k].weight < points->p[k].cost) {
-          points->p[k].cost = distance * points->p[k].weight;
-          points->p[k].assign = i;
-        }
-      }
+      pspeedy_assign_lower(points, k1, k2, i);
 #ifdef ENABLE_THREADS
       pthread_barrier_wait(barrier);
       pthread_barrier_wait(barrier);
@@ -274,13 +317,7 @@ float pspeedy(Points *points, float z, long *kcenter, int pid,
         pthread_mutex_unlock(&mutex);
         pthread_cond_broadcast(&cond);
 #endif
-        for (int k = k1; k < k2; k++) {
-          float distance = dist(points->p[i], points->p[k], points->dim);
-          if (distance * points->p[k].weight < points->p[k].cost) {
-            points->p[k].cost = distance * points->p[k].weight;
-            points->p[k].assign = i;
-          }
-        }
+        pspeedy_assign_lower(points, k1, k2, i);
 #ifdef ENABLE_THREADS
         pthread_barrier_wait(barrier);
 #endif
