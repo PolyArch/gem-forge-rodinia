@@ -23,6 +23,7 @@
 //(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "immintrin.h"
 #include <assert.h>
 #include <fstream>
 #include <iostream>
@@ -56,7 +57,8 @@ using namespace std;
 #define PROFILE // comment this out to disable instrumentation code
 #endif
 
-#define CACHE_LINE 512 // cache line in byte
+#define CACHE_LINE 512         // cache line in byte
+#define HW_CACHE_LINE_BYTES 64 // hardware cache line bytes.
 
 /* this structure represents a point */
 /* these will be passed around to avoid copying coordinates */
@@ -89,6 +91,9 @@ double time_gain;
 double time_shuffle;
 double time_gain_dist;
 double time_gain_init;
+double time_gain_assign;
+int local_search_iters = 0;
+int gain_iters = 0;
 #endif
 
 double gettime() {
@@ -97,9 +102,8 @@ double gettime() {
   return (double)t.tv_sec + t.tv_usec * 1e-6;
 }
 
-int isIdentical(float *i, float *j, int D)
-// tells whether two points of D dimensions are identical
-{
+int isIdentical(float *i, float *j, int D) {
+  // tells whether two points of D dimensions are identical
   int a = 0;
   int equal = 1;
 
@@ -132,11 +136,9 @@ void shuffle(Points *points) {
 #ifdef PROFILE
   double t1 = gettime();
 #endif
-  long i, j;
-  Point temp;
-  for (i = 0; i < points->num - 1; i++) {
-    j = (lrand48() % (points->num - i)) + i;
-    temp = points->p[i];
+  for (long i = 0; i < points->num - 1; i++) {
+    long j = (lrand48() % (points->num - i)) + i;
+    Point temp = points->p[i];
     points->p[i] = points->p[j];
     points->p[j] = temp;
   }
@@ -165,27 +167,27 @@ void intshuffle(int *intarray, int length) {
 #endif
 }
 
-#ifdef INSERT_WASTE
-double waste(double s) {
-  for (int i = 0; i < 4; i++) {
-    s += pow(s, 0.78);
-  }
-  return s;
-}
-#endif
-
 /* compute Euclidean distance squared between two points */
 float dist(Point p1, Point p2, int dim) {
-  int i;
   float result = 0.0;
-  for (i = 0; i < dim; i++)
-    result += (p1.coord[i] - p2.coord[i]) * (p1.coord[i] - p2.coord[i]);
-#ifdef INSERT_WASTE
-  double s = waste(result);
-  result += s;
-  result -= s;
-#endif
-  return (result);
+  for (int64_t i = 0; i < dim; i++) {
+    float v1 = p1.coord[i];
+    float v2 = p2.coord[i];
+    float diff = v1 - v2;
+    result += diff * diff;
+  }
+  return result;
+}
+
+float compute_dist(float *p1, float *p2, int dim) {
+  float result = 0.0;
+  for (int64_t i = 0; i < dim; i++) {
+    float v1 = p1[i];
+    float v2 = p2[i];
+    float diff = v1 - v2;
+    result += diff * diff;
+  }
+  return result;
 }
 
 /* run speedy on the points, return total cost of solution */
@@ -338,6 +340,98 @@ float pspeedy(Points *points, float z, long *kcenter, int pid,
   return (totalcost);
 }
 
+/**
+ * Outlined kernel for pgain distance computing.
+ */
+struct PGainDistArgs {
+  int64_t k1;
+  int64_t k2;
+  int64_t x;
+  Points *points;
+  double *lower;
+};
+__attribute__((noinline)) double pgain_dist(const PGainDistArgs &args) {
+  auto k1 = args.k1;
+  auto k2 = args.k2;
+  auto x = args.x;
+  auto points = args.points;
+  auto lower = args.lower;
+  const int dim = points->dim;
+  double cost_of_opening_x = 0;
+
+  float *p2 = points->p[x].coord;
+#ifdef GEM_FORGE_FIX_DIM_16
+  __m512 valX = _mm512_load_ps(p2);
+#endif
+
+  for (int64_t i = k1; i < k2; i++) {
+    float *p1 = points->p[i].coord;
+    float weight = points->p[i].weight;
+    float current_cost = points->p[i].cost;
+#ifdef GEM_FORGE_FIX_DIM_16
+    __m512 valI = _mm512_load_ps(p1);
+    __m512 valS = _mm512_sub_ps(valX, valI);
+    __m512 valM = _mm512_mul_ps(valS, valS);
+    float distance = _mm512_reduce_add_ps(valM);
+#else
+    float distance = compute_dist(p1, p2, dim);
+#endif
+    float x_cost = distance * weight;
+
+    if (x_cost < current_cost) {
+
+      // point i would save cost just by switching to x
+      // (note that i cannot be a median,
+      // or else dist(p[i], p[x]) would be 0)
+
+      switch_membership[i] = 1;
+      cost_of_opening_x += x_cost - current_cost;
+
+    } else {
+
+      // cost of assigning i to x is at least current assignment cost of i
+
+      // consider the savings that i's **current** median would realize
+      // if we reassigned that median and all its members to x;
+      // note we've already accounted for the fact that the median
+      // would save z by closing; now we have to subtract from the savings
+      // the extra cost of reassigning that median and its members
+      int assign = points->p[i].assign;
+      lower[center_table[assign]] += current_cost - x_cost;
+    }
+  }
+  return cost_of_opening_x;
+}
+
+/**
+ * Outlined kernel for pgain assign.
+ */
+struct PGainAssignArgs {
+  int64_t k1;
+  int64_t k2;
+  int64_t x;
+  Points *points;
+  double *gl_lower;
+};
+__attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
+  auto k1 = args.k1;
+  auto k2 = args.k2;
+  auto x = args.x;
+  auto points = args.points;
+  auto gl_lower = args.gl_lower;
+  const int dim = points->dim;
+  for (int i = k1; i < k2; i++) {
+    bool close_center = gl_lower[center_table[points->p[i].assign]] > 0;
+    if (switch_membership[i] || close_center) {
+      // Either i's median (which may be i itself) is closing,
+      // or i is closer to x than to its current median
+      points->p[i].cost =
+          points->p[i].weight * dist(points->p[i], points->p[x], points->dim);
+      points->p[i].assign = x;
+    }
+  }
+}
+
 /* For a given point x, find the cost of the following operation:
  * -- open a facility at x if there isn't already one there,
  * -- for points y such that the assignment distance of y exceeds dist(y, x),
@@ -387,9 +481,6 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
   }
   int K = stride - 2; // K==*numcenters
 
-  // my own cost of opening x
-  double cost_of_opening_x = 0;
-
   if (pid == 0) {
     work_mem = (double *)malloc(stride * (nproc + 1) * sizeof(double));
     gl_cost_of_opening_x = 0;
@@ -430,6 +521,10 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
   pthread_barrier_wait(barrier);
 #endif
 
+#ifdef GEM_FORGE
+// We have no mask support for AVX512.
+#pragma clang loop vectorize(disable)
+#endif
   for (int i = k1; i < k2; i++) {
     if (is_center[i]) {
       center_table[i] += (int)work_mem[pid * stride];
@@ -455,32 +550,27 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
   // global *lower* fields
   double *gl_lower = &work_mem[nproc * stride];
 
-  for (i = k1; i < k2; i++) {
-    float x_cost =
-        dist(points->p[i], points->p[x], points->dim) * points->p[i].weight;
-    float current_cost = points->p[i].cost;
+  // my own cost of opening x
+  double cost_of_opening_x = 0;
+  {
+    PGainDistArgs args;
+    args.k1 = k1;
+    args.k2 = k2;
+    args.x = x;
+    args.points = points;
+    args.lower = lower;
 
-    if (x_cost < current_cost) {
-
-      // point i would save cost just by switching to x
-      // (note that i cannot be a median,
-      // or else dist(p[i], p[x]) would be 0)
-
-      switch_membership[i] = 1;
-      cost_of_opening_x += x_cost - current_cost;
-
-    } else {
-
-      // cost of assigning i to x is at least current assignment cost of i
-
-      // consider the savings that i's **current** median would realize
-      // if we reassigned that median and all its members to x;
-      // note we've already accounted for the fact that the median
-      // would save z by closing; now we have to subtract from the savings
-      // the extra cost of reassigning that median and its members
-      int assign = points->p[i].assign;
-      lower[center_table[assign]] += current_cost - x_cost;
+#ifdef GEM_FORGE
+    if (pid == 0) {
+      m5_work_begin(0, 0);
     }
+#endif
+    cost_of_opening_x = pgain_dist(args);
+#ifdef GEM_FORGE
+    if (pid == 0) {
+      m5_work_end(0, 0);
+    }
+#endif
   }
 
 #ifdef ENABLE_THREADS
@@ -535,21 +625,22 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
 #ifdef ENABLE_THREADS
   pthread_barrier_wait(barrier);
 #endif
+
+#ifdef PROFILE
+  double t_before_assign = gettime();
+#endif
   // Now, check whether opening x would save cost; if so, do it, and
   // otherwise do nothing
 
   if (gl_cost_of_opening_x < 0) {
     //  we'd save money by opening x; we'll do it
-    for (int i = k1; i < k2; i++) {
-      bool close_center = gl_lower[center_table[points->p[i].assign]] > 0;
-      if (switch_membership[i] || close_center) {
-        // Either i's median (which may be i itself) is closing,
-        // or i is closer to x than to its current median
-        points->p[i].cost =
-            points->p[i].weight * dist(points->p[i], points->p[x], points->dim);
-        points->p[i].assign = x;
-      }
-    }
+    PGainAssignArgs args;
+    args.k1 = k1;
+    args.k2 = k2;
+    args.x = x;
+    args.points = points;
+    args.gl_lower = gl_lower;
+    pgain_assign(args);
     for (int i = k1; i < k2; i++) {
       if (is_center[i] && gl_lower[center_table[i]] > 0) {
         is_center[i] = false;
@@ -570,18 +661,18 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
 #ifdef ENABLE_THREADS
   pthread_barrier_wait(barrier);
 #endif
+
   if (pid == 0) {
     free(work_mem);
-    //    free(is_center);
-    //    free(switch_membership);
-    //    free(proc_cost_of_opening_x);
-    //    free(proc_number_of_centers_to_close);
   }
 
 #ifdef PROFILE
   double t3 = gettime();
-  if (pid == 0)
+  if (pid == 0) {
     time_gain += t3 - t0;
+    time_gain_assign += t3 - t_before_assign;
+    gain_iters++;
+  }
 #endif
   return -gl_cost_of_opening_x;
 }
@@ -767,7 +858,11 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
   z = (hiz + loz) / 2.0;
   /* NEW: Check whether more centers than points! */
   if (points->num <= kmax) {
-    /* just return all points as facilities */
+/* just return all points as facilities */
+#ifdef GEM_FORGE
+// We have no mask support for AVX512.
+#pragma clang loop vectorize(disable)
+#endif
     for (long kk = k1; kk < k2; kk++) {
       points->p[kk].assign = kk;
       points->p[kk].cost = 0;
@@ -789,12 +884,19 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
     printf("thread %d: Finished first call to speedy, cost=%lf, k=%i\n", pid,
            cost, k);
 #endif
+/* give speedy SP chances to get at least kmin/2 facilities */
+#ifdef GEM_FORGE_FIX_SP_1
+  {
+    cost = pspeedy(points, z, &k, pid, barrier);
+    i = 1;
+  }
+#else
   i = 0;
-  /* give speedy SP chances to get at least kmin/2 facilities */
   while ((k < kmin) && (i < SP)) {
     cost = pspeedy(points, z, &k, pid, barrier);
     i++;
   }
+#endif
 
 #ifdef PRINTINFO
   if (pid == 0)
@@ -808,15 +910,22 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
       printf("Speedy indicates we should try lower z\n");
     }
 #endif
+
+#ifdef GEM_FORGE_FIX_SP_1
+    hiz = z;
+    z = (hiz + loz) / 2.0;
+    i = 1;
+#else
     if (i >= SP) {
       hiz = z;
       z = (hiz + loz) / 2.0;
       i = 0;
     }
+    i++;
+#endif
     if (pid == 0)
       shuffle(points);
     cost = pspeedy(points, z, &k, pid, barrier);
-    i++;
   }
 
   /* now we begin the binary search for real */
@@ -836,6 +945,11 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
 #endif
 
   while (1) {
+#ifdef PROFILE
+    if (pid == 0) {
+      local_search_iters++;
+    }
+#endif
 #ifdef PRINTINFO
     if (pid == 0) {
       printf("loz = %lf, hiz = %lf\n", loz, hiz);
@@ -957,15 +1071,19 @@ struct pkmedian_arg_t {
   long kmin;
   long kmax;
   long *kfinal;
-  int pid;
   pthread_barrier_t *barrier;
 };
 
+/**
+ * We have to use global pkmedian_arg to stop compiler generate masked scatter
+ * instruction from AVX512.
+ */
+pkmedian_arg_t pkmedian_arg;
 void *localSearchSub(void *arg_) {
 
-  pkmedian_arg_t *arg = (pkmedian_arg_t *)arg_;
-  pkmedian(arg->points, arg->kmin, arg->kmax, arg->kfinal, arg->pid,
-           arg->barrier);
+  pkmedian_arg_t *arg = &pkmedian_arg;
+  long pid = reinterpret_cast<long>(arg_);
+  pkmedian(arg->points, arg->kmin, arg->kmax, arg->kfinal, pid, arg->barrier);
 
   return NULL;
 }
@@ -982,26 +1100,31 @@ void localSearch(Points *points, long kmin, long kmax, long *kfinal) {
   pthread_t *threads = new pthread_t[nproc];
   pkmedian_arg_t *arg = new pkmedian_arg_t[nproc];
 
-  for (int i = 0; i < nproc; i++) {
-    arg[i].points = points;
-    arg[i].kmin = kmin;
-    arg[i].kmax = kmax;
-    arg[i].pid = i;
-    arg[i].kfinal = kfinal;
+  pkmedian_arg.points = points;
+  pkmedian_arg.kmin = kmin;
+  pkmedian_arg.kmax = kmax;
+  pkmedian_arg.kfinal = kfinal;
+  pkmedian_arg.barrier = &barrier;
 
-    arg[i].barrier = &barrier;
 #ifdef ENABLE_THREADS
-    pthread_create(threads + i, NULL, localSearchSub, (void *)&arg[i]);
+  // Start thread for job 1 to nproc.
+  for (int i = 1; i < nproc; ++i) {
+    pthread_create(threads + i, NULL, localSearchSub,
+                   reinterpret_cast<void *>(i));
+  }
+  // I am the main thread.
+  localSearchSub(0);
 #else
-    localSearchSub(&arg[0]);
-#endif
-  }
-
   for (int i = 0; i < nproc; i++) {
-#ifdef ENABLE_THREADS
-    pthread_join(threads[i], NULL);
-#endif
+    localSearchSub(0);
   }
+#endif
+
+#ifdef ENABLE_THREADS
+  for (int i = 1; i < nproc; i++) {
+    pthread_join(threads[i], NULL);
+  }
+#endif
 
   delete[] threads;
   delete[] arg;
@@ -1076,13 +1199,17 @@ void outcenterIDs(Points *centers, long *centerIDs, char *outfile) {
     exit(1);
   }
   int *is_a_median = (int *)calloc(sizeof(int), centers->num);
+#ifdef GEM_FORGE
+// We have no mask support for AVX512.
+#pragma clang loop vectorize(disable)
+#endif
   for (int i = 0; i < centers->num; i++) {
     is_a_median[centers->p[i].assign] = 1;
   }
 
   for (int i = 0; i < centers->num; i++) {
     if (is_a_median[i]) {
-      fprintf(fp, "%u\n", centerIDs[i]);
+      fprintf(fp, "%ld\n", centerIDs[i]);
       fprintf(fp, "%lf\n", centers->p[i].weight);
       for (int k = 0; k < centers->dim; k++) {
         fprintf(fp, "%lf ", centers->p[i].coord[k]);
@@ -1095,9 +1222,12 @@ void outcenterIDs(Points *centers, long *centerIDs, char *outfile) {
 
 void streamCluster(PStream *stream, long kmin, long kmax, int dim,
                    long chunksize, long centersize, char *outfile) {
-  float *block = (float *)malloc(chunksize * dim * sizeof(float));
-  float *centerBlock = (float *)malloc(centersize * dim * sizeof(float));
-  long *centerIDs = (long *)malloc(centersize * dim * sizeof(long));
+  float *block = (float *)aligned_alloc(HW_CACHE_LINE_BYTES,
+                                        chunksize * dim * sizeof(float));
+  float *centerBlock = (float *)aligned_alloc(HW_CACHE_LINE_BYTES,
+                                              centersize * dim * sizeof(float));
+  long *centerIDs = (long *)aligned_alloc(HW_CACHE_LINE_BYTES,
+                                          centersize * dim * sizeof(long));
 
   if (block == NULL) {
     fprintf(stderr, "not enough memory for a chunk!\n");
@@ -1108,6 +1238,10 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   points.dim = dim;
   points.num = chunksize;
   points.p = (Point *)malloc(chunksize * sizeof(Point));
+#ifdef GEM_FORGE
+// We only have partial support on this.
+#pragma clang loop vectorize(disable)
+#endif
   for (int i = 0; i < chunksize; i++) {
     points.p[i].coord = &block[i * dim];
   }
@@ -1117,6 +1251,10 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   centers.p = (Point *)malloc(centersize * sizeof(Point));
   centers.num = 0;
 
+#ifdef GEM_FORGE
+// We only have partial support on this.
+#pragma clang loop vectorize(disable)
+#endif
   for (int i = 0; i < centersize; i++) {
     centers.p[i].coord = &centerBlock[i * dim];
     centers.p[i].weight = 1.0;
@@ -1124,10 +1262,81 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
 
   long IDoffset = 0;
   long kfinal;
+
+#ifdef GEM_FORGE_FIX_ONE_CHUNK
+  {
+    size_t numRead = stream->read(block, dim, chunksize);
+    fprintf(stderr, "read %lu points\n", numRead);
+
+    if (stream->ferror() ||
+        numRead < (unsigned int)chunksize && !stream->feof()) {
+      fprintf(stderr, "error reading data!\n");
+      exit(1);
+    }
+
+    points.num = numRead;
+#ifdef GEM_FORGE
+// We only have partial support on this.
+#pragma clang loop vectorize(disable)
+#endif
+    for (int i = 0; i < points.num; i++) {
+      points.p[i].weight = 1.0;
+    }
+
+    switch_membership =
+        (bool *)aligned_alloc(HW_CACHE_LINE_BYTES, points.num * sizeof(bool));
+    is_center = (bool *)calloc(points.num, sizeof(bool));
+    center_table =
+        (int *)aligned_alloc(HW_CACHE_LINE_BYTES, points.num * sizeof(int));
+
+#ifdef GEM_FORGE
+    m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+// Nothing to warm up about.
+#endif
+    m5_reset_stats(0, 0);
+#endif
+
+    localSearch(&points, kmin, kmax, &kfinal);
+
+    fprintf(stderr, "finish local search\n");
+    contcenters(&points);
+    if (kfinal + centers.num > centersize) {
+      // here we don't handle the situation where # of centers gets too large.
+      fprintf(stderr, "oops! no more space for centers\n");
+      exit(1);
+    }
+
+#ifdef PRINTINFO
+    printf("finish cont center\n");
+#endif
+
+    copycenters(&points, &centers, centerIDs, IDoffset);
+    IDoffset += numRead;
+
+#ifdef PRINTINFO
+    printf("finish copy centers\n");
+#endif
+
+    free(is_center);
+    free(switch_membership);
+    free(center_table);
+  }
+
+#else
+
+#ifdef GEM_FORGE
+  m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+// Nothing to warm up about.
+#endif
+  m5_reset_stats(0, 0);
+#endif
+
   while (1) {
 
     size_t numRead = stream->read(block, dim, chunksize);
-    fprintf(stderr, "read %d points\n", numRead);
+    fprintf(stderr, "read %lu points\n", numRead);
 
     if (stream->ferror() ||
         numRead < (unsigned int)chunksize && !stream->feof()) {
@@ -1173,6 +1382,7 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
       break;
     }
   }
+#endif
 
   // finally cluster all temp centers
   switch_membership = (bool *)malloc(centers.num * sizeof(bool));
@@ -1182,6 +1392,11 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   localSearch(&centers, kmin, kmax, &kfinal);
   contcenters(&centers);
   outcenterIDs(&centers, centerIDs, outfile);
+
+#ifdef GEM_FORGE
+  m5_detail_sim_end();
+  exit(0);
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -1218,6 +1433,18 @@ int main(int argc, char **argv) {
   strcpy(infilename, argv[7]);
   strcpy(outfilename, argv[8]);
   nproc = atoi(argv[9]);
+#ifdef GEM_FORGE_FIX_DIM_16
+  if (dim != 16) {
+    printf("GEM_FORGE_FIX_DIM_16, dim = %d.\n", dim);
+    exit(1);
+  }
+#endif
+#ifdef GEM_FORGE_FIX_ONE_CHUNK
+  if (n != chunksize) {
+    printf("GEM_FORGE_FIX_ONE_CHUNK n %ld chunksize %ld.\n", n, chunksize);
+    exit(1);
+  }
+#endif
 
   srand48(SEED);
   PStream *stream;
@@ -1238,12 +1465,15 @@ int main(int argc, char **argv) {
   delete stream;
 #ifdef PROFILE
   printf("time pgain = %lf\n", time_gain);
-  printf("time pgain_dist = %lf\n", time_gain_dist);
   printf("time pgain_init = %lf\n", time_gain_init);
+  printf("time pgain_dist = %lf\n", time_gain_dist);
+  printf("time pgain_assign = %lf\n", time_gain_assign);
   printf("time pselect = %lf\n", time_select_feasible);
   printf("time pspeedy = %lf\n", time_speedy);
   printf("time pshuffle = %lf\n", time_shuffle);
   printf("time localSearch = %lf\n", time_local_search);
+  printf("iter localSearch = %d\n", local_search_iters);
+  printf("iter gain = %d\n", gain_iters);
 #endif
 
   return 0;
