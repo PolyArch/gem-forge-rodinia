@@ -1190,20 +1190,6 @@ int main(int argc, char **argv) {
   long kmin, kmax, n, chunksize, clustersize;
   int dim;
 
-#ifdef PARSEC_VERSION
-#define __PARSEC_STRING(x) #x
-#define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
-  printf(
-      "PARSEC Benchmark Suite Version "__PARSEC_XSTRING(PARSEC_VERSION) "\n");
-  fflush(NULL);
-#else
-  printf("PARSEC Benchmark Suite\n");
-  fflush(NULL);
-#endif // PARSEC_VERSION
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_bench_begin(__parsec_streamcluster);
-#endif
-
   if (argc < 10) {
     fprintf(stderr,
             "usage: %s k1 k2 d n chunksize clustersize infile outfile nproc\n",
@@ -1243,13 +1229,7 @@ int main(int argc, char **argv) {
 
   double t1 = gettime();
 
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_roi_begin();
-#endif
   streamCluster(stream, kmin, kmax, dim, chunksize, clustersize, outfilename);
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_roi_end();
-#endif
 
   double t2 = gettime();
 
@@ -1264,10 +1244,6 @@ int main(int argc, char **argv) {
   printf("time pspeedy = %lf\n", time_speedy);
   printf("time pshuffle = %lf\n", time_shuffle);
   printf("time localSearch = %lf\n", time_local_search);
-#endif
-
-#ifdef ENABLE_PARSEC_HOOKS
-  __parsec_bench_end();
 #endif
 
   return 0;
