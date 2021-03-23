@@ -97,6 +97,10 @@ int local_search_iters = 0;
 int gain_iters = 0;
 #endif
 
+#ifdef GEM_FORGE
+static bool gem_forge_switched = false;
+#endif
+
 double gettime() {
   struct timeval t;
   gettimeofday(&t, NULL);
@@ -465,6 +469,7 @@ __attribute__((noinline)) double pgain_dist(const PGainDistArgs &args) {
     float *p1 = pos + points->p[i].index;
     float weight = points->p[i].weight;
     float current_cost = points->p[i].cost;
+    int assign = points->p[i].assign;
 #ifdef GEM_FORGE_FIX_DIM_16
     __m512 valI = _mm512_load_ps(p1);
     __m512 valS = _mm512_sub_ps(valX, valI);
@@ -493,11 +498,50 @@ __attribute__((noinline)) double pgain_dist(const PGainDistArgs &args) {
       // note we've already accounted for the fact that the median
       // would save z by closing; now we have to subtract from the savings
       // the extra cost of reassigning that median and its members
-      int assign = points->p[i].assign;
       lower[center_table[assign]] += current_cost - x_cost;
     }
   }
   return cost_of_opening_x;
+}
+
+struct PGainCollectCostArgs {
+  int64_t k1;
+  int64_t k2;
+  double z;
+  int stride;
+  double *work_mem;
+  double *gl_lower;
+  double cost_of_opening_x;
+  int number_of_centers_to_close;
+};
+
+__attribute__((noinline)) void pgain_collect_cost(PGainCollectCostArgs &args) {
+  auto k1 = args.k1;
+  auto k2 = args.k2;
+  auto z = args.z;
+  auto stride = args.stride;
+  auto work_mem = args.work_mem;
+  auto gl_lower = args.gl_lower;
+  auto &cost_of_opening_x = args.cost_of_opening_x;
+  auto &number_of_centers_to_close = args.number_of_centers_to_close;
+  for (int i = k1; i < k2; i++) {
+    if (is_center[i]) {
+      double low = z;
+      // aggregate from all threads
+      for (int p = 0; p < nproc; p++) {
+        low += work_mem[center_table[i] + p * stride];
+      }
+      gl_lower[center_table[i]] = low;
+      if (low > 0) {
+        // i is a median, and
+        // if we were to open x (which we still may not) we'd close i
+
+        // note, we'll ignore the following quantity unless we do open x
+        ++number_of_centers_to_close;
+        cost_of_opening_x -= low;
+      }
+    }
+  }
 }
 
 /**
@@ -518,14 +562,29 @@ __attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
   auto gl_lower = args.gl_lower;
   auto *pos = points->pos;
   const int dim = points->dim;
+
+  auto *p2 = pos + points->p[x].index;
+#ifdef GEM_FORGE_FIX_DIM_16
+  __m512 valX = _mm512_load_ps(p2);
+#endif
+
   for (int i = k1; i < k2; i++) {
-    bool close_center = gl_lower[center_table[points->p[i].assign]] > 0;
+    auto weight = points->p[i].weight;
+    auto assign = points->p[i].assign;
+    auto *p1 = pos + points->p[i].index;
+#ifdef GEM_FORGE_FIX_DIM_16
+    __m512 valI = _mm512_load_ps(p1);
+    __m512 valS = _mm512_sub_ps(valX, valI);
+    __m512 valM = _mm512_mul_ps(valS, valS);
+    auto distance = _mm512_reduce_add_ps(valM);
+#else
+    auto distance = compute_dist(p1, p2, dim);
+#endif
+    bool close_center = gl_lower[center_table[assign]] > 0;
     if (switch_membership[i] || close_center) {
       // Either i's median (which may be i itself) is closing,
       // or i is closer to x than to its current median
-      points->p[i].cost =
-          points->p[i].weight *
-          compute_dist(pos + points->p[i].index, pos + points->p[x].index, dim);
+      points->p[i].cost = weight * distance;
       points->p[i].assign = x;
     }
   }
@@ -686,25 +745,21 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
 
   // at this time, we can calculate the cost of opening a center
   // at x; if it is negative, we'll go through with opening it
-
-  for (int i = k1; i < k2; i++) {
-    if (is_center[i]) {
-      double low = z;
-      // aggregate from all threads
-      for (int p = 0; p < nproc; p++) {
-        low += work_mem[center_table[i] + p * stride];
-      }
-      gl_lower[center_table[i]] = low;
-      if (low > 0) {
-        // i is a median, and
-        // if we were to open x (which we still may not) we'd close i
-
-        // note, we'll ignore the following quantity unless we do open x
-        ++number_of_centers_to_close;
-        cost_of_opening_x -= low;
-      }
-    }
+  {
+    PGainCollectCostArgs args;
+    args.k1 = k1;
+    args.k2 = k2;
+    args.gl_lower = gl_lower;
+    args.work_mem = work_mem;
+    args.stride = stride;
+    args.z = z;
+    args.number_of_centers_to_close = number_of_centers_to_close;
+    args.cost_of_opening_x = cost_of_opening_x;
+    pgain_collect_cost(args);
+    number_of_centers_to_close = args.number_of_centers_to_close;
+    cost_of_opening_x = args.cost_of_opening_x;
   }
+
   // use the rest of working memory to store the following
   work_mem[pid * stride + K] = number_of_centers_to_close;
   work_mem[pid * stride + K + 1] = cost_of_opening_x;
@@ -790,6 +845,21 @@ float pFL(Points *points, int *feasible, int numfeasible, float z, long *k,
 #ifdef ENABLE_THREADS
   pthread_barrier_wait(barrier);
 #endif
+
+#ifdef GEM_FORGE_SWITCH_FL
+  if (pid == 0 && !gem_forge_switched) {
+    gem_forge_switched = true;
+    m5_detail_sim_start();
+#ifdef GEM_FORGE_WARM_CACHE
+// Nothing to warm up about.
+#endif
+    m5_reset_stats(0, 0);
+  }
+#ifdef ENABLE_THREADS
+  pthread_barrier_wait(barrier);
+#endif
+#endif
+
   long i;
   long x;
   double change;
@@ -1430,8 +1500,9 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
     center_table =
         (int *)aligned_alloc(HW_CACHE_LINE_BYTES, points.num * sizeof(int));
 
-#ifdef GEM_FORGE
+#ifdef GEM_FORGE_SWITCH_LOCAL_SEARCH
     m5_detail_sim_start();
+    gem_forge_switched = true;
 #ifdef GEM_FORGE_WARM_CACHE
 // Nothing to warm up about.
 #endif
