@@ -64,16 +64,17 @@ using namespace std;
 /* these will be passed around to avoid copying coordinates */
 typedef struct {
   float weight;
-  float *coord;
-  long assign; /* number of point where this one is assigned */
-  float cost;  /* cost of that assignment, weight*distance */
+  int32_t index;
+  int32_t assign; /* number of point where this one is assigned */
+  float cost;     /* cost of that assignment, weight*distance */
 } Point;
 
 /* this is the array of points */
 typedef struct {
-  long num; /* number of points; may not be N if this is a sample */
-  int dim;  /* dimensionality */
-  Point *p; /* the array itself */
+  long num;   /* number of points; may not be N if this is a sample */
+  int dim;    /* dimensionality */
+  Point *p;   /* the array itself */
+  float *pos; /* the position array */
 } Points;
 
 static bool *switch_membership; // whether to switch membership in pgain
@@ -132,7 +133,7 @@ static int floatcomp(const void *i, const void *j) {
 }
 
 /* shuffle points into random order */
-void shuffle(Points *points) {
+__attribute__((noinline)) void shuffle(Points *points) {
 #ifdef PROFILE
   double t1 = gettime();
 #endif
@@ -168,17 +169,6 @@ void intshuffle(int *intarray, int length) {
 }
 
 /* compute Euclidean distance squared between two points */
-float dist(Point p1, Point p2, int dim) {
-  float result = 0.0;
-  for (int64_t i = 0; i < dim; i++) {
-    float v1 = p1.coord[i];
-    float v2 = p2.coord[i];
-    float diff = v1 - v2;
-    result += diff * diff;
-  }
-  return result;
-}
-
 float compute_dist(float *p1, float *p2, int dim) {
   float result = 0.0;
   for (int64_t i = 0; i < dim; i++) {
@@ -194,13 +184,14 @@ __attribute__((noinline)) void pspeedy_assign_first(Points *points, long k1,
                                                     long k2) {
   /* create center at first point, send it to itself */
   const int dim = points->dim;
-  float *p2 = points->p[0].coord;
+  float *pos = points->pos;
+  float *p2 = pos + points->p[0].index;
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
 
   for (int64_t i = k1; i < k2; i++) {
-    float *p1 = points->p[i].coord;
+    float *p1 = pos + points->p[i].index;
     float weight = points->p[i].weight;
 #ifdef GEM_FORGE_FIX_DIM_16
     __m512 valI = _mm512_load_ps(p1);
@@ -219,13 +210,14 @@ __attribute__((noinline)) void pspeedy_assign_lower(Points *points, long k1,
                                                     long k2, long target) {
   // Assign the point to target if the cost is lower.
   const int dim = points->dim;
-  float *p2 = points->p[target].coord;
+  float *pos = points->pos;
+  float *p2 = pos + points->p[target].index;
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
 
   for (int64_t i = k1; i < k2; i++) {
-    float *p1 = points->p[i].coord;
+    float *p1 = pos + points->p[i].index;
     float weight = points->p[i].weight;
     float current_cost = points->p[i].cost;
 #ifdef GEM_FORGE_FIX_DIM_16
@@ -393,16 +385,17 @@ __attribute__((noinline)) double pgain_dist(const PGainDistArgs &args) {
   auto x = args.x;
   auto points = args.points;
   auto lower = args.lower;
+  float *pos = points->pos;
   const int dim = points->dim;
   double cost_of_opening_x = 0;
 
-  float *p2 = points->p[x].coord;
+  float *p2 = pos + points->p[x].index;
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
 
   for (int64_t i = k1; i < k2; i++) {
-    float *p1 = points->p[i].coord;
+    float *p1 = pos + points->p[i].index;
     float weight = points->p[i].weight;
     float current_cost = points->p[i].cost;
 #ifdef GEM_FORGE_FIX_DIM_16
@@ -456,6 +449,7 @@ __attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
   auto x = args.x;
   auto points = args.points;
   auto gl_lower = args.gl_lower;
+  auto *pos = points->pos;
   const int dim = points->dim;
   for (int i = k1; i < k2; i++) {
     bool close_center = gl_lower[center_table[points->p[i].assign]] > 0;
@@ -463,7 +457,8 @@ __attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
       // Either i's median (which may be i itself) is closing,
       // or i is closer to x than to its current median
       points->p[i].cost =
-          points->p[i].weight * dist(points->p[i], points->p[x], points->dim);
+          points->p[i].weight *
+          compute_dist(pos + points->p[i].index, pos + points->p[x].index, dim);
       points->p[i].assign = x;
     }
   }
@@ -603,15 +598,16 @@ double pgain(long x, Points *points, double z, long int *numcenters, int pid,
     }
 #endif
     cost_of_opening_x = pgain_dist(args);
-#ifdef GEM_FORGE
-    if (pid == 0) {
-      m5_work_end(0, 0);
-    }
-#endif
   }
 
 #ifdef ENABLE_THREADS
   pthread_barrier_wait(barrier);
+#endif
+
+#ifdef GEM_FORGE
+  if (pid == 0) {
+    m5_work_end(0, 0);
+  }
 #endif
 
 #ifdef PROFILE
@@ -857,6 +853,7 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
   hiz = loz = 0.0;
   long numberOfPoints = points->num;
   long ptDimension = points->dim;
+  auto *pos = points->pos;
 
   // my block
   long bsize = points->num / nproc;
@@ -878,8 +875,8 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
 
   double myhiz = 0;
   for (long kk = k1; kk < k2; kk++) {
-    myhiz +=
-        dist(points->p[kk], points->p[0], ptDimension) * points->p[kk].weight;
+    auto distance = compute_dist(pos + points->p[kk].index, pos, ptDimension);
+    myhiz += distance * points->p[kk].weight;
   }
   hizs[pid] = myhiz;
 
@@ -1051,19 +1048,27 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
 }
 
 /* compute the means for the k clusters */
-int contcenters(Points *points) {
+__attribute__((noinline)) int contcenters(Points *points) {
   long i, ii;
   float relweight;
+
+  auto pos = points->pos;
+  const int dim = points->dim;
 
   for (i = 0; i < points->num; i++) {
     /* compute relative weight of this point to the cluster */
     if (points->p[i].assign != i) {
       relweight = points->p[points->p[i].assign].weight + points->p[i].weight;
       relweight = points->p[i].weight / relweight;
-      for (ii = 0; ii < points->dim; ii++) {
-        points->p[points->p[i].assign].coord[ii] *= 1.0 - relweight;
-        points->p[points->p[i].assign].coord[ii] +=
-            points->p[i].coord[ii] * relweight;
+      auto assign = points->p[i].assign;
+      auto assign_index = points->p[assign].index;
+      auto assign_pos = pos + assign_index;
+      auto i_pos = pos + points->p[i].index;
+
+      for (ii = 0; ii < dim; ii++) {
+        auto v = assign_pos[ii];
+        auto w = (1.0 - relweight) * v + relweight * i_pos[ii];
+        assign_pos[ii] = w;
       }
       points->p[points->p[i].assign].weight += points->p[i].weight;
     }
@@ -1086,12 +1091,14 @@ void copycenters(Points *points, Points *centers, long *centerIDs,
   }
 
   k = centers->num;
+  const int dim = points->dim;
+  auto pos = points->pos;
 
   /* count how many  */
   for (i = 0; i < points->num; i++) {
     if (is_a_median[i]) {
-      memcpy(centers->p[k].coord, points->p[i].coord,
-             points->dim * sizeof(float));
+      memcpy(pos + centers->p[k].index, pos + points->p[i].index,
+             dim * sizeof(float));
       centers->p[k].weight = points->p[i].weight;
       centerIDs[k] = i + offset;
       k++;
@@ -1244,12 +1251,16 @@ void outcenterIDs(Points *centers, long *centerIDs, char *outfile) {
     is_a_median[centers->p[i].assign] = 1;
   }
 
+  const int dim = centers->dim;
+  auto *pos = centers->pos;
+
   for (int i = 0; i < centers->num; i++) {
     if (is_a_median[i]) {
       fprintf(fp, "%ld\n", centerIDs[i]);
       fprintf(fp, "%lf\n", centers->p[i].weight);
-      for (int k = 0; k < centers->dim; k++) {
-        fprintf(fp, "%lf ", centers->p[i].coord[k]);
+      auto *i_pos = pos + centers->p[i].index;
+      for (int k = 0; k < dim; k++) {
+        fprintf(fp, "%lf ", i_pos[k]);
       }
       fprintf(fp, "\n\n");
     }
@@ -1275,25 +1286,27 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   points.dim = dim;
   points.num = chunksize;
   points.p = (Point *)malloc(chunksize * sizeof(Point));
+  points.pos = block;
 #ifdef GEM_FORGE
 // We only have partial support on this.
 #pragma clang loop vectorize(disable)
 #endif
   for (int i = 0; i < chunksize; i++) {
-    points.p[i].coord = &block[i * dim];
+    points.p[i].index = i * dim;
   }
 
   Points centers;
   centers.dim = dim;
   centers.p = (Point *)malloc(centersize * sizeof(Point));
   centers.num = 0;
+  centers.pos = centerBlock;
 
 #ifdef GEM_FORGE
 // We only have partial support on this.
 #pragma clang loop vectorize(disable)
 #endif
   for (int i = 0; i < centersize; i++) {
-    centers.p[i].coord = &centerBlock[i * dim];
+    centers.p[i].index = i * dim;
     centers.p[i].weight = 1.0;
   }
 
