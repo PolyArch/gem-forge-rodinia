@@ -235,6 +235,105 @@ __attribute__((noinline)) void pspeedy_assign_lower(Points *points, long k1,
   }
 }
 
+struct PSpeedyOpenArgs {
+  int k1;
+  int k2;
+  float z;
+  int *pi;
+  bool *popen;
+  Points *points;
+  long *kcenter;
+  pthread_barrier_t *barrier;
+  pthread_mutex_t *mutex;
+  pthread_cond_t *cond;
+};
+
+__attribute__((noinline)) void
+pspeedy_open_master(const PSpeedyOpenArgs &args) {
+
+  auto k1 = args.k1;
+  auto k2 = args.k2;
+  auto z = args.z;
+  auto points = args.points;
+  auto kcenter = args.kcenter;
+  auto &i = *args.pi;
+  auto &open = *args.popen;
+  auto barrier = args.barrier;
+  auto mutex = args.mutex;
+  auto cond = args.cond;
+
+  // I am the master thread. I decide whether to open a center and
+  // notify others if so.
+  for (i = 1; i < points->num; i++) {
+    bool to_open =
+        ((float)lrand48() / (float)INT_MAX) < (points->p[i].cost / z);
+    if (to_open) {
+      (*kcenter)++;
+#ifdef ENABLE_THREADS
+      pthread_mutex_lock(mutex);
+#endif
+      open = true;
+#ifdef ENABLE_THREADS
+      pthread_mutex_unlock(mutex);
+      pthread_cond_broadcast(cond);
+#endif
+      pspeedy_assign_lower(points, k1, k2, i);
+#ifdef ENABLE_THREADS
+      pthread_barrier_wait(barrier);
+#endif
+      open = false;
+#ifdef ENABLE_THREADS
+      pthread_barrier_wait(barrier);
+#endif
+    }
+  }
+#ifdef ENABLE_THREADS
+  pthread_mutex_lock(mutex);
+#endif
+  open = true;
+#ifdef ENABLE_THREADS
+  pthread_mutex_unlock(mutex);
+  pthread_cond_broadcast(cond);
+#endif
+}
+
+__attribute__((noinline)) void pspeedy_open_slave(const PSpeedyOpenArgs &args) {
+  auto k1 = args.k1;
+  auto k2 = args.k2;
+  auto points = args.points;
+  auto &i = *args.pi;
+  auto &open = *args.popen;
+  auto barrier = args.barrier;
+  auto mutex = args.mutex;
+  auto cond = args.cond;
+
+  while (true) {
+#ifdef ENABLE_THREADS
+    pthread_mutex_lock(mutex);
+    while (!open)
+      pthread_cond_wait(cond, mutex);
+    pthread_mutex_unlock(mutex);
+#endif
+    if (i >= points->num)
+      break;
+    pspeedy_assign_lower(points, k1, k2, i);
+#ifdef ENABLE_THREADS
+    pthread_barrier_wait(barrier);
+    pthread_barrier_wait(barrier);
+#endif
+  }
+}
+
+__attribute__((noinline)) double pspeedy_sum_cost(Points *points, int k1,
+                                                  int k2) {
+
+  double mytotal = 0.0;
+  for (int k = k1; k < k2; k++) {
+    mytotal += points->p[k].cost;
+  }
+  return mytotal;
+}
+
 /* run speedy on the points, return total cost of solution */
 float pspeedy(Points *points, float z, long *kcenter, int pid,
               pthread_barrier_t *barrier) {
@@ -277,65 +376,33 @@ float pspeedy(Points *points, float z, long *kcenter, int pid,
     costs = (double *)malloc(sizeof(double) * nproc);
   }
 
-  if (pid !=
-      0) { // we are not the master threads. we wait until a center is opened.
-    while (1) {
+  PSpeedyOpenArgs args;
+  args.k1 = k1;
+  args.k2 = k2;
+  args.z = z;
+  args.pi = &i;
+  args.popen = &open;
+  args.points = points;
+  args.kcenter = kcenter;
+  args.barrier = barrier;
 #ifdef ENABLE_THREADS
-      pthread_mutex_lock(&mutex);
-      while (!open)
-        pthread_cond_wait(&cond, &mutex);
-      pthread_mutex_unlock(&mutex);
+  args.mutex = &mutex;
+  args.cond = &cond;
 #endif
-      if (i >= points->num)
-        break;
-      pspeedy_assign_lower(points, k1, k2, i);
-#ifdef ENABLE_THREADS
-      pthread_barrier_wait(barrier);
-      pthread_barrier_wait(barrier);
-#endif
-    }
-  } else { // I am the master thread. I decide whether to open a center and
-           // notify others if so.
-    for (i = 1; i < points->num; i++) {
-      bool to_open =
-          ((float)lrand48() / (float)INT_MAX) < (points->p[i].cost / z);
-      if (to_open) {
-        (*kcenter)++;
-#ifdef ENABLE_THREADS
-        pthread_mutex_lock(&mutex);
-#endif
-        open = true;
-#ifdef ENABLE_THREADS
-        pthread_mutex_unlock(&mutex);
-        pthread_cond_broadcast(&cond);
-#endif
-        pspeedy_assign_lower(points, k1, k2, i);
-#ifdef ENABLE_THREADS
-        pthread_barrier_wait(barrier);
-#endif
-        open = false;
-#ifdef ENABLE_THREADS
-        pthread_barrier_wait(barrier);
-#endif
-      }
-    }
-#ifdef ENABLE_THREADS
-    pthread_mutex_lock(&mutex);
-#endif
-    open = true;
-#ifdef ENABLE_THREADS
-    pthread_mutex_unlock(&mutex);
-    pthread_cond_broadcast(&cond);
-#endif
+
+  if (pid != 0) {
+    // we are not the master threads. we wait until a center is opened.
+    pspeedy_open_slave(args);
+  } else {
+    // I am the master thread. I decide whether to open a center and
+    // notify others if so.
+    pspeedy_open_master(args);
   }
 #ifdef ENABLE_THREADS
   pthread_barrier_wait(barrier);
 #endif
   open = false;
-  double mytotal = 0;
-  for (int k = k1; k < k2; k++) {
-    mytotal += points->p[k].cost;
-  }
+  double mytotal = pspeedy_sum_cost(points, k1, k2);
   costs[pid] = mytotal;
 #ifdef ENABLE_THREADS
   pthread_barrier_wait(barrier);
@@ -835,6 +902,34 @@ int selectfeasible_fast(Points *points, int **feasible, int kmin, int pid,
   return numfeasible;
 }
 
+__attribute__((noinline)) float sum_weighted_distance(Points *points, int k1,
+                                                      int k2, int target) {
+  float *pos = points->pos;
+  const int dim = points->dim;
+  double sum = 0;
+
+  float *p2 = pos + points->p[target].index;
+
+#ifdef GEM_FORGE_FIX_DIM_16
+  __m512 valB = _mm512_load_ps(p2);
+#endif
+
+  for (long kk = k1; kk < k2; kk++) {
+    float *p1 = pos + points->p[kk].index;
+    auto weight = points->p[kk].weight;
+#ifdef GEM_FORGE_FIX_DIM_16
+    __m512 valI = _mm512_load_ps(p1);
+    __m512 valS = _mm512_sub_ps(valB, valI);
+    __m512 valM = _mm512_mul_ps(valS, valS);
+    auto distance = _mm512_reduce_add_ps(valM);
+#else
+    auto distance = compute_dist(p1, p2, dim);
+#endif
+    sum += distance * points->p[kk].weight;
+  }
+  return sum;
+}
+
 /* compute approximate kmedian on the points */
 float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
                pthread_barrier_t *barrier) {
@@ -873,11 +968,7 @@ float pkmedian(Points *points, long kmin, long kmax, long *kfinal, int pid,
   pthread_barrier_wait(barrier);
 #endif
 
-  double myhiz = 0;
-  for (long kk = k1; kk < k2; kk++) {
-    auto distance = compute_dist(pos + points->p[kk].index, pos, ptDimension);
-    myhiz += distance * points->p[kk].weight;
-  }
+  double myhiz = sum_weighted_distance(points, k1, k2, 0);
   hizs[pid] = myhiz;
 
 #ifdef ENABLE_THREADS
