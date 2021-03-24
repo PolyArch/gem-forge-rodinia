@@ -16,7 +16,7 @@ cpu:
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) streamcluster_original.cpp -o $(TARGET_C) $(LIBS) -DENABLE_THREADS -pthread
 
 gf:
-	g++ -O3 -DENABLE_THREADS -pthread -o $(TARGET_O) streamcluster_gem_forge.cpp
+	g++ -O3 -g -DENABLE_THREADS -pthread -o $(TARGET_O) streamcluster_gem_forge.cpp
 
 
 clean:

@@ -64,17 +64,17 @@ using namespace std;
 /* these will be passed around to avoid copying coordinates */
 typedef struct {
   float weight;
-  int32_t index;
   int32_t assign; /* number of point where this one is assigned */
   float cost;     /* cost of that assignment, weight*distance */
 } Point;
 
 /* this is the array of points */
 typedef struct {
-  long num;   /* number of points; may not be N if this is a sample */
-  int dim;    /* dimensionality */
-  Point *p;   /* the array itself */
-  float *pos; /* the position array */
+  long num;       /* number of points; may not be N if this is a sample */
+  int dim;        /* dimensionality */
+  Point *p;       /* the array itself */
+  float *pos;     /* the position array */
+  int32_t *index; /* the index array */
 } Points;
 
 static bool *switch_membership; // whether to switch membership in pgain
@@ -146,6 +146,9 @@ __attribute__((noinline)) void shuffle(Points *points) {
     Point temp = points->p[i];
     points->p[i] = points->p[j];
     points->p[j] = temp;
+    int32_t index = points->index[i];
+    points->index[i] = points->index[j];
+    points->index[j] = index;
   }
 #ifdef PROFILE
   double t2 = gettime();
@@ -189,13 +192,13 @@ __attribute__((noinline)) void pspeedy_assign_first(Points *points, long k1,
   /* create center at first point, send it to itself */
   const int dim = points->dim;
   float *pos = points->pos;
-  float *p2 = pos + points->p[0].index;
+  float *p2 = pos + points->index[0];
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
 
   for (int64_t i = k1; i < k2; i++) {
-    float *p1 = pos + points->p[i].index;
+    float *p1 = pos + points->index[i];
     float weight = points->p[i].weight;
 #ifdef GEM_FORGE_FIX_DIM_16
     __m512 valI = _mm512_load_ps(p1);
@@ -215,13 +218,13 @@ __attribute__((noinline)) void pspeedy_assign_lower(Points *points, long k1,
   // Assign the point to target if the cost is lower.
   const int dim = points->dim;
   float *pos = points->pos;
-  float *p2 = pos + points->p[target].index;
+  float *p2 = pos + points->index[target];
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
 
   for (int64_t i = k1; i < k2; i++) {
-    float *p1 = pos + points->p[i].index;
+    float *p1 = pos + points->index[i];
     float weight = points->p[i].weight;
     float current_cost = points->p[i].cost;
 #ifdef GEM_FORGE_FIX_DIM_16
@@ -460,13 +463,13 @@ __attribute__((noinline)) double pgain_dist(const PGainDistArgs &args) {
   const int dim = points->dim;
   double cost_of_opening_x = 0;
 
-  float *p2 = pos + points->p[x].index;
+  float *p2 = pos + points->index[x];
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
 
   for (int64_t i = k1; i < k2; i++) {
-    float *p1 = pos + points->p[i].index;
+    float *p1 = pos + points->index[i];
     float weight = points->p[i].weight;
     float current_cost = points->p[i].cost;
     int assign = points->p[i].assign;
@@ -563,7 +566,7 @@ __attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
   auto *pos = points->pos;
   const int dim = points->dim;
 
-  auto *p2 = pos + points->p[x].index;
+  auto *p2 = pos + points->index[x];
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valX = _mm512_load_ps(p2);
 #endif
@@ -571,7 +574,7 @@ __attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
   for (int i = k1; i < k2; i++) {
     auto weight = points->p[i].weight;
     auto assign = points->p[i].assign;
-    auto *p1 = pos + points->p[i].index;
+    auto *p1 = pos + points->index[i];
 #ifdef GEM_FORGE_FIX_DIM_16
     __m512 valI = _mm512_load_ps(p1);
     __m512 valS = _mm512_sub_ps(valX, valI);
@@ -978,14 +981,14 @@ __attribute__((noinline)) float sum_weighted_distance(Points *points, int k1,
   const int dim = points->dim;
   double sum = 0;
 
-  float *p2 = pos + points->p[target].index;
+  float *p2 = pos + points->index[target];
 
 #ifdef GEM_FORGE_FIX_DIM_16
   __m512 valB = _mm512_load_ps(p2);
 #endif
 
   for (long kk = k1; kk < k2; kk++) {
-    float *p1 = pos + points->p[kk].index;
+    float *p1 = pos + points->index[kk];
     auto weight = points->p[kk].weight;
 #ifdef GEM_FORGE_FIX_DIM_16
     __m512 valI = _mm512_load_ps(p1);
@@ -1222,9 +1225,9 @@ __attribute__((noinline)) int contcenters(Points *points) {
       relweight = points->p[points->p[i].assign].weight + points->p[i].weight;
       relweight = points->p[i].weight / relweight;
       auto assign = points->p[i].assign;
-      auto assign_index = points->p[assign].index;
+      auto assign_index = points->index[assign];
       auto assign_pos = pos + assign_index;
-      auto i_pos = pos + points->p[i].index;
+      auto i_pos = pos + points->index[i];
 
       for (ii = 0; ii < dim; ii++) {
         auto v = assign_pos[ii];
@@ -1258,7 +1261,7 @@ void copycenters(Points *points, Points *centers, long *centerIDs,
   /* count how many  */
   for (i = 0; i < points->num; i++) {
     if (is_a_median[i]) {
-      memcpy(pos + centers->p[k].index, pos + points->p[i].index,
+      memcpy(pos + centers->index[k], pos + points->index[i],
              dim * sizeof(float));
       centers->p[k].weight = points->p[i].weight;
       centerIDs[k] = i + offset;
@@ -1419,7 +1422,7 @@ void outcenterIDs(Points *centers, long *centerIDs, char *outfile) {
     if (is_a_median[i]) {
       fprintf(fp, "%ld\n", centerIDs[i]);
       fprintf(fp, "%lf\n", centers->p[i].weight);
-      auto *i_pos = pos + centers->p[i].index;
+      auto *i_pos = pos + centers->index[i];
       for (int k = 0; k < dim; k++) {
         fprintf(fp, "%lf ", i_pos[k]);
       }
@@ -1448,12 +1451,14 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   points.num = chunksize;
   points.p = (Point *)malloc(chunksize * sizeof(Point));
   points.pos = block;
+  points.index = (int32_t *)aligned_alloc(HW_CACHE_LINE_BYTES,
+                                          chunksize * sizeof(int32_t));
 #ifdef GEM_FORGE
 // We only have partial support on this.
 #pragma clang loop vectorize(disable)
 #endif
   for (int i = 0; i < chunksize; i++) {
-    points.p[i].index = i * dim;
+    points.index[i] = i * dim;
   }
 
   Points centers;
@@ -1461,13 +1466,15 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   centers.p = (Point *)malloc(centersize * sizeof(Point));
   centers.num = 0;
   centers.pos = centerBlock;
+  centers.index = (int32_t *)aligned_alloc(HW_CACHE_LINE_BYTES,
+                                          centersize * sizeof(int32_t));
 
 #ifdef GEM_FORGE
 // We only have partial support on this.
 #pragma clang loop vectorize(disable)
 #endif
   for (int i = 0; i < centersize; i++) {
-    centers.p[i].index = i * dim;
+    centers.index[i] = i * dim;
     centers.p[i].weight = 1.0;
   }
 
@@ -1676,6 +1683,7 @@ int main(int argc, char **argv) {
 
   delete stream;
 #ifdef PROFILE
+  printf("sizeof(Point) = %d.\n", sizeof(Point));
   printf("time pgain = %lf\n", time_gain);
   printf("time pgain_init = %lf\n", time_gain_init);
   printf("time pgain_dist = %lf\n", time_gain_dist);
