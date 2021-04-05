@@ -3,12 +3,12 @@
 
 //#define OUTPUT
 
+#include <malloc.h>
 #include <math.h>
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -58,19 +58,19 @@ int main(int argc, char *argv[]) {
   uint64_t size_I = cols * rows;
   uint64_t size_R = (r2 - r1 + 1) * (c2 - c1 + 1);
 
-  float *I = (float *)malloc(size_I * sizeof(float));
-  float *J = (float *)malloc(size_I * sizeof(float));
-  float *c = (float *)malloc(size_I * sizeof(float));
+  float *I = (float *)aligned_alloc(64, size_I * sizeof(float));
+  float *J = (float *)aligned_alloc(64, size_I * sizeof(float));
+  float *c = (float *)aligned_alloc(64, size_I * sizeof(float));
 
   /**
    * Store the intermediate results.
    * dN, dS, dW, dE.
    */
-  float *delta = (float *)malloc(sizeof(float) * size_I * 4);
-  float *deltaN = (float *)malloc(sizeof(float) * size_I);
-  float *deltaS = (float *)malloc(sizeof(float) * size_I);
-  float *deltaE = (float *)malloc(sizeof(float) * size_I);
-  float *deltaW = (float *)malloc(sizeof(float) * size_I);
+  float *delta = (float *)aligned_alloc(64, sizeof(float) * size_I * 4);
+  float *deltaN = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  float *deltaS = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  float *deltaE = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  float *deltaW = (float *)aligned_alloc(64, sizeof(float) * size_I);
 
   printf("Randomizing the input matrix\n");
 
@@ -82,7 +82,7 @@ int main(int argc, char *argv[]) {
 
   printf("Start the SRAD main loop\n");
   omp_set_num_threads(nthreads);
-  kmp_set_stacksize_s(8*1024*1024);
+  kmp_set_stacksize_s(8 * 1024 * 1024);
 #ifdef GEM_FORGE
   // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
@@ -90,17 +90,25 @@ int main(int argc, char *argv[]) {
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
+  /**
+   * Warm them up separately to make sure paddr is continuous.
+   */
+#define WARM_ARRAY(A)                                                          \
+  for (int64_t i = 0; i < rows * cols; i += 64 / sizeof(float)) {              \
+    volatile float v = A[i];                                                   \
+  }
+  WARM_ARRAY(J);
+  WARM_ARRAY(c);
+  WARM_ARRAY(deltaN);
+  WARM_ARRAY(deltaS);
+  WARM_ARRAY(deltaW);
+  WARM_ARRAY(deltaE);
+#undef WARM_ARRAY
+
+// Start the threads.
 #pragma omp parallel for firstprivate(rows, cols) schedule(static)
-  for (uint64_t i = 0; i < rows; ++i) {
-    for (uint64_t j = 0; j < cols; j += 64 / sizeof(float)) {
-      int idx = i * cols + j;
-      volatile float vj = J[idx];
-      volatile float vc = c[idx];
-      volatile float vdeltaN = deltaN[idx];
-      volatile float vdeltaS = deltaS[idx];
-      volatile float vdeltaW = deltaW[idx];
-      volatile float vdeltaE = deltaE[idx];
-    }
+  for (uint64_t i = 0; i < nthreads; ++i) {
+    volatile float vj = J[i];
   }
   m5_reset_stats(0, 0);
 #endif
@@ -203,8 +211,8 @@ int main(int argc, char *argv[]) {
         uint64_t k = i * cols + j;
         uint64_t kS = k + cols;
 #endif
-         // ! Accessing j + 1.
-         // Out of bound.
+        // ! Accessing j + 1.
+        // Out of bound.
         // diffusion coefficent
         float cN = c[k];
         float cS = c[kS];
@@ -218,7 +226,10 @@ int main(int argc, char *argv[]) {
         float D = cN * dNValue + cS * dSValue + cW * dWValue + cE * dEValue;
 
         // image update (equ 61)
-        J[k] = J[k] + 0.25 * lambda * D;
+        // J[k] = J[k] + 0.25f * lambda * D;
+        // ! GemForge
+        // Fix lambda to reduce the number of input for the computation.
+        J[k] = J[k] + 0.25f * D;
       }
     }
 #ifdef GEM_FORGE

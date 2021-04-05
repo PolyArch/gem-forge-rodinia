@@ -3,8 +3,6 @@ CC=clang
 
 include ../GemForge.Makefile.include
 
-all: bfs.exe
-
 riscv: raw.riscv.exe
 
 %.bc: %.cpp

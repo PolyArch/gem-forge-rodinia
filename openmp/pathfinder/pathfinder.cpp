@@ -126,21 +126,15 @@ void run(int argc, char **argv) {
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 
-/**
- * In Ruby, cache is disabled in fast forward mode.
- * However, this program only run once, so we manually
- * warm up the cache by iterating through the wall array
- * and reset stats after that.
- * Of course this will make the simulation time longer.
- */
 #ifdef GEM_FORGE_WARM_CACHE
-  for (int t = 0; t < rows; ++t) {
-    for (int n = 0; n < cols; n += (64 / sizeof(int))) {
-      volatile int v = wall[t * cols + n];
-    }
+  // Touch them to warm up.
+  for (int64_t n = 0; n < rows * cols; n += (64 / sizeof(int))) {
+    volatile int v = wall[n];
   }
-  for (int n = 0; n < cols; n += (64 / sizeof(int))) {
+  for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
     volatile int vs = src[n];
+  }
+  for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
     volatile int vd = dst[n];
   }
 #pragma omp parallel for firstprivate(wall) schedule(static)
