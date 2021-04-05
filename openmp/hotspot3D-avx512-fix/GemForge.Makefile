@@ -8,7 +8,7 @@ all: bfs.exe
 riscv: raw.riscv.exe
 
 3D.bc: 3D.c
-	$(CC) $(CC_FLAGS) -march=knl -DGEM_FORGE_FIX_INPUT $^ -emit-llvm -c -o $@
+	$(CC) $(CC_FLAGS) -march=knl -DFIX_ROW=512 -DFIX_COL=512 -DFIX_Z=8 $^ -emit-llvm -c -o $@
 
 raw.bc: 3D.bc
 	llvm-link $^ -o $@

@@ -1,12 +1,13 @@
 #include <assert.h>
+#include <malloc.h>
 #include <math.h>
 #include <omp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
-#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
@@ -128,67 +129,112 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
   ct = cb = stepDivCap / Rz;
   cc = 1.0 - (2.0 * ce + 2.0 * cn + 3.0 * ct);
 
-  {
-    int count = 0;
-    FLOAT *tIn_t = tIn;
-    FLOAT *tOut_t = tOut;
+  int count = 0;
+  FLOAT *tIn_t = tIn;
+  FLOAT *tOut_t = tOut;
 
-    do {
+  do {
 #ifdef GEM_FORGE
-      m5_work_begin(0, 0);
+    m5_work_begin(0, 0);
 #endif
+    /**
+     * ! This will access one element out of the array,
+     * ! but we leave it there to have perfect vectorization.
+     */
 
+#if defined(FIX_ROW) && defined(FIX_COL) && defined(FIX_Z)
+#define ROW_SIZE FIX_ROW
+#define COL_SIZE FIX_COL
+#define MAT_SIZE (ROW_SIZE * COL_SIZE)
+
+#pragma omp parallel for schedule(static) firstprivate(tIn_t, pIn, tOut_t)
+    for (uint64_t z = 1; z < FIX_Z - 1; z++) {
+      for (uint64_t y = 0; y < ROW_SIZE; y++) {
+#pragma omp simd
+        for (uint64_t x = 0; x < COL_SIZE; x++) {
+          uint64_t c = x + y * COL_SIZE + z * MAT_SIZE;
+          uint64_t idxT = c - MAT_SIZE;
+          uint64_t idxB = c + MAT_SIZE;
+          uint64_t idxN = c - COL_SIZE;
+          uint64_t idxS = c + COL_SIZE;
+          // Use fixed immediate.
+          FLOAT localCC = 0.5;
+          FLOAT localCE = 0.6;
+          FLOAT localCW = 0.2;
+          FLOAT localCN = 0.3;
+          FLOAT localCS = 0.4;
+          FLOAT localCT = 0.8;
+          FLOAT localCB = 0.7;
+          FLOAT localdt = 0.1;
+          FLOAT localCap = 0.8;
+          FLOAT localAmb = 0.7;
+          uint64_t idxW = c - 1;
+          uint64_t idxE = c + 1;
+          FLOAT p = pIn[c];
+          FLOAT tc = tIn_t[c];
+          FLOAT tw = tIn_t[idxW];
+          FLOAT te = tIn_t[idxE];
+          FLOAT tn = tIn_t[idxN];
+          FLOAT ts = tIn_t[idxS];
+          FLOAT tb = tIn_t[idxB];
+          FLOAT tt = tIn_t[idxT];
+          tOut_t[c] = localCC * tc + localCW * tw + localCE * te +
+                      localCS * ts + localCN * tn + localCB * tb +
+                      localCT * tt + (localdt / localCap) * p +
+                      localCT * localAmb;
+        }
+      }
+    }
+
+#else
 #pragma omp parallel for schedule(static)                                      \
     firstprivate(tIn_t, pIn, tOut_t, ce, cw, cn, cs, ct, cb, cc, nx, ny, nz,   \
                  amb_temp, dt, Cap)
-      for (uint64_t z = 1; z < nz - 1; z++) {
-#ifdef GEM_FORGE_FIX_INPUT
-        for (uint64_t y = 0; y < 512; y++) {
+    for (uint64_t z = 1; z < nz - 1; z++) {
+      for (uint64_t y = 0; y < ny; y++) {
 #pragma omp simd
-          for (uint64_t x = 0; x < 512; x++) {
-            uint64_t c = x + y * 512 + z * 512 * 512;
-            uint64_t idxT = c - 512 * 512;
-            uint64_t idxB = c + 512 * 512;
-            uint64_t idxN = c - 512;
-            uint64_t idxS = c + 512;
-#else
-        for (uint64_t y = 0; y < ny; y++) {
-#pragma omp simd
-          for (uint64_t x = 0; x < nx; x++) {
-            uint64_t c = x + y * nx + z * nx * ny;
-            uint64_t idxT = c - nx * ny;
-            uint64_t idxB = c + nx * ny;
-            uint64_t idxN = c - nx;
-            uint64_t idxS = c + nx;
-#endif
-            /**
-             * ! This will access one element out of the array,
-             * ! but we leave it there to have perfect vectorization.
-             */
-            uint64_t idxW = c - 1;
-            uint64_t idxE = c + 1;
-            FLOAT p = pIn[c];
-            FLOAT tc = tIn_t[c];
-            FLOAT tw = tIn_t[idxW];
-            FLOAT te = tIn_t[idxE];
-            FLOAT tn = tIn_t[idxN];
-            FLOAT ts = tIn_t[idxS];
-            FLOAT tb = tIn_t[idxB];
-            FLOAT tt = tIn_t[idxT];
-            tOut_t[c] = cc * tc + cw * tw + ce * te + cs * ts + cn * tn +
-                        cb * tb + ct * tt + (dt / Cap) * p + ct * amb_temp;
-          }
+        for (uint64_t x = 0; x < nx; x++) {
+          uint64_t c = x + y * nx + z * nx * ny;
+          uint64_t idxT = c - nx * ny;
+          uint64_t idxB = c + nx * ny;
+          uint64_t idxN = c - nx;
+          uint64_t idxS = c + nx;
+          FLOAT localCC = cc;
+          FLOAT localCE = ce;
+          FLOAT localCW = cw;
+          FLOAT localCN = cn;
+          FLOAT localCS = cs;
+          FLOAT localCT = ct;
+          FLOAT localCB = cb;
+          FLOAT localdt = dt;
+          FLOAT localCap = Cap;
+          FLOAT localAmb = amb_temp;
+          uint64_t idxW = c - 1;
+          uint64_t idxE = c + 1;
+          FLOAT p = pIn[c];
+          FLOAT tc = tIn_t[c];
+          FLOAT tw = tIn_t[idxW];
+          FLOAT te = tIn_t[idxE];
+          FLOAT tn = tIn_t[idxN];
+          FLOAT ts = tIn_t[idxS];
+          FLOAT tb = tIn_t[idxB];
+          FLOAT tt = tIn_t[idxT];
+          tOut_t[c] = localCC * tc + localCW * tw + localCE * te +
+                      localCS * ts + localCN * tn + localCB * tb +
+                      localCT * tt + (localdt / localCap) * p +
+                      localCT * localAmb;
         }
       }
-#ifdef GEM_FORGE
-      m5_work_end(0, 0);
+    }
 #endif
-      FLOAT *t = tIn_t;
-      tIn_t = tOut_t;
-      tOut_t = t;
-      count++;
-    } while (count < numiter);
-  }
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+#endif
+    FLOAT *t = tIn_t;
+    tIn_t = tOut_t;
+    tOut_t = t;
+    count++;
+  } while (count < numiter);
   return;
 }
 
@@ -222,9 +268,15 @@ int main(int argc, char **argv) {
   char *pfile = argv[5];
   char *tfile = argv[6];
   char *ofile = argv[7];
+#if defined(FIX_ROW) && defined(FIX_COL) && defined(FIX_Z)
+  int numCols = FIX_COL;
+  int numRows = FIX_ROW;
+  int layers = FIX_Z;
+#else
   int numCols = atoi(argv[1]);
   int numRows = atoi(argv[1]);
   int layers = atoi(argv[2]);
+#endif
   int iterations = atoi(argv[3]);
   int numThreads = atoi(argv[4]);
   if (numThreads + 2 > layers) {
@@ -242,28 +294,18 @@ int main(int argc, char **argv) {
   FLOAT Ry = dx / (2.0 * K_SI * t_chip * dy);
   FLOAT Rz = dz / (K_SI * dx * dy);
 
-  // cout << Rx << " " << Ry << " " << Rz << endl;
   FLOAT max_slope = MAX_PD / (FACTOR_CHIP * t_chip * SPEC_HEAT_SI);
   FLOAT dt = PRECISION / max_slope;
 
   int size = numCols * numRows * layers;
 
   FLOAT *powerIn = (FLOAT *)calloc(size, sizeof(FLOAT));
-  FLOAT *tempCopy = (FLOAT *)malloc(size * sizeof(FLOAT));
   FLOAT *tempIn = (FLOAT *)calloc(size, sizeof(FLOAT));
   FLOAT *tempOut = (FLOAT *)calloc(size, sizeof(FLOAT));
-  FLOAT *answer = (FLOAT *)calloc(size, sizeof(FLOAT));
-
-  // readinput(powerIn, numRows, numCols, layers, pfile);
-  // readinput(tempIn, numRows, numCols, layers, tfile);
-  // memcpy(tempCopy, tempIn, size * sizeof(FLOAT));
 
   omp_set_dynamic(0);
   omp_set_num_threads(numThreads);
   printf("%d threads running\n", omp_get_num_threads());
-#ifdef GEM_FORGE
-  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
-#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
