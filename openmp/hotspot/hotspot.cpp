@@ -69,12 +69,22 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
       uint64_t idx = r * GEM_FORGE_FIX_INPUT_SIZE + c;
       uint64_t idxS = idx + GEM_FORGE_FIX_INPUT_SIZE;
       uint64_t idxN = idx - GEM_FORGE_FIX_INPUT_SIZE;
+      // Just use some constant number to avoid too many inputs for stream
+      // computation.
+      FLOAT Cap = 0.5;
+      FLOAT Rx = 1.5;
+      FLOAT Ry = 1.2;
+      FLOAT Rz = 0.7;
 #else
 #pragma omp simd
     for (uint64_t c = 0; c < col; ++c) {
       uint64_t idx = r * col + c;
       uint64_t idxS = idx + col;
       uint64_t idxN = idx - col;
+      FLOAT Cap = Cap_1;
+      FLOAT Rx = Rx_1;
+      FLOAT Ry = Ry_1;
+      FLOAT Rz = Rz_1;
 #endif
       uint64_t idxE = idx + 1;
       uint64_t idxW = idx - 1;
@@ -84,9 +94,9 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
       FLOAT tempN = temp[idxN];
       FLOAT tempE = temp[idxE];
       FLOAT tempW = temp[idxW];
-      FLOAT delta = Cap_1 * (powerC + (tempS + tempN - 2.f * tempC) * Ry_1 +
-                             (tempE + tempW - 2.f * tempC) * Rx_1 +
-                             (amb_temp - tempC) * Rz_1);
+      FLOAT delta =
+          Cap * (powerC + (tempS + tempN - 2.f * tempC) * Ry +
+                 (tempE + tempW - 2.f * tempC) * Rx + (amb_temp - tempC) * Rz);
       result[idx] = tempC + delta;
     }
   }
@@ -164,15 +174,22 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
-#pragma omp parallel for shared(power, temp, result) firstprivate(row, col)    \
-    schedule(static)
-  for (uint64_t r = 0; r < row; ++r) {
-    for (uint64_t c = 0; c < col; c += 64 / sizeof(FLOAT)) {
-      int idx = r * col + c;
-      volatile FLOAT vr = result[idx];
-      volatile FLOAT vt = temp[idx];
-      volatile FLOAT vp = power[idx];
-    }
+  /**
+   * Warm up like this to make paddr continuous.
+   */
+  for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
+    volatile FLOAT vr = result[i];
+  }
+  for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
+    volatile FLOAT vr = temp[i];
+  }
+  for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
+    volatile FLOAT vr = power[i];
+  }
+  // Start the threads.
+#pragma omp parallel for schedule(static)
+  for (uint64_t r = 0; r < num_omp_threads; ++r) {
+    volatile FLOAT vr = result[r];
   }
   m5_reset_stats(0, 0);
 #endif
@@ -255,14 +272,14 @@ int main(int argc, char **argv) {
 #endif
 
   /* allocate memory for the temperature and power arrays	*/
-  temp = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
-  power = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
-  result = (FLOAT *)calloc(grid_rows * grid_cols, sizeof(FLOAT));
+  temp = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
+  power = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
+  result = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
   if (!temp || !power) {
     printf("unable to allocate memory");
     exit(1);
   }
-  printf("Size of array %dMB.\n",
+  printf("Size of array %luMB.\n",
          3 * grid_rows * grid_cols * sizeof(FLOAT) / 1024 / 1024);
 
   /* read initial temperatures and input power	*/
