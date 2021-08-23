@@ -1,3 +1,4 @@
+#include <malloc.h>
 #include <math.h>
 #include <omp.h>
 #include <stdint.h>
@@ -5,17 +6,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <malloc.h>
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
 #endif
 
 #define MAX_ARGS 10
-#define REC_LENGTH 49     // size of a record in db
+#define REC_LENGTH 49      // size of a record in db
 #define REC_WINDOW 2097152 // number of records to read at a time
-#define LATITUDE_POS 28   // location of latitude coordinates in input record
-#define OPEN 10000        // initial value of nearest neighbors
+#define LATITUDE_POS 28    // location of latitude coordinates in input record
+#define OPEN 10000         // initial value of nearest neighbors
 struct Neighbor {
   char entry[REC_LENGTH];
   uint32_t update_idx;
@@ -51,15 +51,7 @@ struct __attribute__((packed)) Record {
  * work for the threads
  */
 
-#ifndef IS_BINARY
-#define IS_BINARY 1
-#endif
-
-#if IS_BINARY == 1
 struct Record sandbox[REC_WINDOW];
-#else
-char sandbox[REC_LENGTH * REC_WINDOW];
-#endif
 int64_t rec_count;
 void final_reduce(int k, int threads, struct Neighbor *neighbors,
                   struct Neighbor *reduce_neighbors) {
@@ -91,12 +83,7 @@ void final_reduce(int k, int threads, struct Neighbor *neighbors,
     uint32_t update_idx = neighbors[i].update_idx;
     neighbors[i].update_idx = UINT32_MAX;
     if (update_idx != UINT32_MAX) {
-#if IS_BINARY == 1
       strcpy(neighbors[i].entry, sandbox[update_idx].name);
-#else
-      sandbox[(update_idx + 1) * REC_LENGTH - 1] = '\0';
-      strcpy(neighbors[i].entry, sandbox + update_idx * REC_LENGTH);
-#endif
     }
   }
 }
@@ -149,12 +136,8 @@ void process(FILE *flist, struct Neighbor *neighbors,
     m5_work_begin(0, 0);
 #endif
 
-// Read in REC_WINDOW number of records
-#if IS_BINARY == 1
+    // Read in REC_WINDOW number of records
     rec_count = fread(sandbox, sizeof(struct Record), REC_WINDOW, fp);
-#else
-    rec_count = fread(sandbox, REC_LENGTH, REC_WINDOW, fp);
-#endif
     if (rec_count != REC_WINDOW) {
       if (!ferror(flist)) { // an eof occured
         fclose(fp);
@@ -187,14 +170,8 @@ void process(FILE *flist, struct Neighbor *neighbors,
 #pragma omp parallel for firstprivate(z, target_lat, target_long, rec_count)   \
     schedule(static)
     for (int64_t i = 0; i < rec_count; i++) {
-#if IS_BINARY == 1
       float tmp_lat = sandbox[i].lat;
       float tmp_long = sandbox[i].lon;
-#else
-      char *rec_iter = sandbox + (i * REC_LENGTH + LATITUDE_POS - 1);
-      float tmp_lat = atof(rec_iter);
-      float tmp_long = atof(rec_iter + 5);
-#endif
       z[i] = (((tmp_lat - target_lat) * (tmp_lat - target_lat)) +
               ((tmp_long - target_long) * (tmp_long - target_long)));
     }

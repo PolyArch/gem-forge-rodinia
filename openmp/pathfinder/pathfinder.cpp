@@ -1,9 +1,9 @@
 #include <assert.h>
+#include <malloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <malloc.h>
 
 #include <omp.h>
 
@@ -24,9 +24,10 @@ void run(int argc, char **argv);
 
 int64_t rows, cols;
 int num_threads;
-int *data;
 int *wall;
 int *result;
+int *temp;
+int *Buffer;
 #define M_SEED 9
 
 void init(int argc, char **argv) {
@@ -38,14 +39,64 @@ void init(int argc, char **argv) {
     printf("Usage: pathfiner width num_of_steps num_of_threads\n");
     exit(0);
   }
-  wall = reinterpret_cast<int *>(aligned_alloc(64, rows * cols * sizeof(int)));
-  result = reinterpret_cast<int *>(aligned_alloc(64, (cols + 2) * sizeof(int)));
+  // wall = reinterpret_cast<int *>(aligned_alloc(64, rows * cols *
+  // sizeof(int))); temp = reinterpret_cast<int *>(aligned_alloc(64, (cols + 2)
+  // * sizeof(int))); result = reinterpret_cast<int *>(aligned_alloc(64, (cols +
+  // 2) * sizeof(int)));
 
-  int seed = M_SEED;
-  srand(seed);
+  // Make result offset by some pages.
+#ifndef OFFSET_BYTES
+#define OFFSET_BYTES 0
+#endif
+  const int OFFSET_ELEMENTS = OFFSET_BYTES / sizeof(int);
+  const int PAGE_SIZE = 4096;
+  const int CACHE_BLOCK_SIZE = 64;
+  const int64_t size = rows * cols;
+  int64_t totalBytes = (size + 2 * cols + 4) * sizeof(int) + OFFSET_BYTES;
+  int64_t numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; ++i) {
+    idx[i] = i;
+  }
+#ifdef RANDOMIZE
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int j = numPages - 1; j > 0; --j) {
+    int i = (int)(((float)(rand()) / (float)(RAND_MAX)) * j);
+    int tmp = idx[i];
+    idx[i] = idx[j];
+    idx[j] = tmp;
+  }
+#endif
+  Buffer = (int *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
+  wall = Buffer + 0;
+  temp = Buffer + size;
+  result = Buffer + size + cols + OFFSET_ELEMENTS;
+
+  // Now we touch all the pages according to the index.
+  int elementsPerPage = PAGE_SIZE / sizeof(int);
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; i++) {
+    int pageIdx = idx[i];
+    int elementIdx = pageIdx * elementsPerPage;
+    volatile int v = Buffer[elementIdx];
+  }
+
+#ifdef GEM_FORGE
+  // Stream SNUCA.
+  m5_stream_nuca_region(wall, sizeof(wall[0]), size);
+  m5_stream_nuca_region(temp, sizeof(temp[0]), cols);
+  m5_stream_nuca_region(result, sizeof(result[0]), cols);
+  m5_stream_nuca_align(wall, wall, cols);
+  m5_stream_nuca_align(temp, wall, 0);
+  m5_stream_nuca_align(result, wall, 0);
+  m5_stream_nuca_remap();
+#endif
 
 #ifndef GEM_FORGE
   // No need to initialize as it's data independent.
+  int seed = M_SEED;
+  srand(seed);
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j++) {
       wall[i * cols + j] = rand() % 10;
@@ -107,11 +158,10 @@ void run(int argc, char **argv) {
 
   unsigned long long cycles;
 
-  int *src, *dst, *temp;
   int min;
 
-  dst = result;
-  src = reinterpret_cast<int *>(aligned_alloc(64, (cols + 2) * sizeof(int)));
+  int *dst = result;
+  int *src = temp;
 
   pin_stats_reset();
 

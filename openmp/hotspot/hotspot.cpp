@@ -254,7 +254,6 @@ void usage(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   int grid_rows, grid_cols, sim_time, i;
-  FLOAT *temp, *power, *result;
   char *tfile, *pfile, *ofile;
 
   /* check validity of inputs	*/
@@ -272,9 +271,60 @@ int main(int argc, char **argv) {
 #endif
 
   /* allocate memory for the temperature and power arrays	*/
-  temp = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
-  power = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
-  result = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
+  // FLOAT *temp = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
+  // FLOAT *power = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
+  // FLOAT *result = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
+
+  // Make result offset by some pages.
+#ifndef OFFSET_BYTES
+#define OFFSET_BYTES 0
+#endif
+  const int OFFSET_ELEMENTS = OFFSET_BYTES / sizeof(FLOAT);
+  const int PAGE_SIZE = 4096;
+  const int CACHE_BLOCK_SIZE = 64;
+  const int size = grid_rows * grid_cols;
+  int totalBytes = 3 * size * sizeof(FLOAT) + OFFSET_BYTES;
+  int numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; ++i) {
+    idx[i] = i;
+  }
+#ifdef RANDOMIZE
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int j = numPages - 1; j > 0; --j) {
+    int i = (int)(((float)(rand()) / (float)(RAND_MAX)) * j);
+    int tmp = idx[i];
+    idx[i] = idx[j];
+    idx[j] = tmp;
+  }
+#endif
+  FLOAT *Buffer =
+      (FLOAT *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
+  FLOAT *temp = Buffer + 0;
+  FLOAT *power = Buffer + size;
+  FLOAT *result = Buffer + size + size + OFFSET_ELEMENTS;
+
+  // Now we touch all the pages according to the index.
+  int elementsPerPage = PAGE_SIZE / sizeof(FLOAT);
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; i++) {
+    int pageIdx = idx[i];
+    int elementIdx = pageIdx * elementsPerPage;
+    volatile FLOAT v = Buffer[elementIdx];
+  }
+
+#ifdef GEM_FORGE
+  // Stream SNUCA.
+  m5_stream_nuca_region(temp, sizeof(temp[0]), size);
+  m5_stream_nuca_region(power, sizeof(power[0]), size);
+  m5_stream_nuca_region(result, sizeof(result[0]), size);
+  m5_stream_nuca_align(power, power, grid_cols);
+  m5_stream_nuca_align(temp, power, 0);
+  m5_stream_nuca_align(result, power, 0);
+  m5_stream_nuca_remap();
+#endif
+
   if (!temp || !power) {
     printf("unable to allocate memory");
     exit(1);
@@ -299,8 +349,9 @@ int main(int argc, char **argv) {
 
   compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);
   /* cleanup	*/
-  free(temp);
-  free(power);
+  // free(temp);
+  // free(power);
+  free(Buffer);
 
   return 0;
 }

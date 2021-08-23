@@ -147,44 +147,63 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
 #define COL_SIZE FIX_COL
 #define MAT_SIZE (ROW_SIZE * COL_SIZE)
 
+#ifdef FUSE_OUTER_LOOPS
+
+#define START_ROW ROW_SIZE
+#define END_ROW ((FIX_Z - 1) * ROW_SIZE)
+
+#ifdef GEM_FORGE_DYN_SCHEDULE
+#pragma omp parallel for schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)             \
+    firstprivate(tIn_t, pIn, tOut_t)
+#else
+#pragma omp parallel for schedule(static) firstprivate(tIn_t, pIn, tOut_t)
+#endif
+    for (uint64_t row = START_ROW; row < END_ROW; ++row) {
+#pragma omp simd
+      for (uint64_t x = 0; x < COL_SIZE; x++) {
+        uint64_t c = x + row * COL_SIZE;
+#else
 #pragma omp parallel for schedule(static) firstprivate(tIn_t, pIn, tOut_t)
     for (uint64_t z = 1; z < FIX_Z - 1; z++) {
       for (uint64_t y = 0; y < ROW_SIZE; y++) {
 #pragma omp simd
         for (uint64_t x = 0; x < COL_SIZE; x++) {
           uint64_t c = x + y * COL_SIZE + z * MAT_SIZE;
-          uint64_t idxT = c - MAT_SIZE;
-          uint64_t idxB = c + MAT_SIZE;
-          uint64_t idxN = c - COL_SIZE;
-          uint64_t idxS = c + COL_SIZE;
-          // Use fixed immediate.
-          FLOAT localCC = 0.5;
-          FLOAT localCE = 0.6;
-          FLOAT localCW = 0.2;
-          FLOAT localCN = 0.3;
-          FLOAT localCS = 0.4;
-          FLOAT localCT = 0.8;
-          FLOAT localCB = 0.7;
-          FLOAT localdt = 0.1;
-          FLOAT localCap = 0.8;
-          FLOAT localAmb = 0.7;
-          uint64_t idxW = c - 1;
-          uint64_t idxE = c + 1;
-          FLOAT p = pIn[c];
-          FLOAT tc = tIn_t[c];
-          FLOAT tw = tIn_t[idxW];
-          FLOAT te = tIn_t[idxE];
-          FLOAT tn = tIn_t[idxN];
-          FLOAT ts = tIn_t[idxS];
-          FLOAT tb = tIn_t[idxB];
-          FLOAT tt = tIn_t[idxT];
-          tOut_t[c] = localCC * tc + localCW * tw + localCE * te +
-                      localCS * ts + localCN * tn + localCB * tb +
-                      localCT * tt + (localdt / localCap) * p +
-                      localCT * localAmb;
-        }
+#endif
+
+        uint64_t idxT = c - MAT_SIZE;
+        uint64_t idxB = c + MAT_SIZE;
+        uint64_t idxN = c - COL_SIZE;
+        uint64_t idxS = c + COL_SIZE;
+        // Use fixed immediate.
+        FLOAT localCC = 0.5;
+        FLOAT localCE = 0.6;
+        FLOAT localCW = 0.2;
+        FLOAT localCN = 0.3;
+        FLOAT localCS = 0.4;
+        FLOAT localCT = 0.8;
+        FLOAT localCB = 0.7;
+        FLOAT localdt = 0.1;
+        FLOAT localCap = 0.8;
+        FLOAT localAmb = 0.7;
+        uint64_t idxW = c - 1;
+        uint64_t idxE = c + 1;
+        FLOAT p = pIn[c];
+        FLOAT tc = tIn_t[c];
+        FLOAT tw = tIn_t[idxW];
+        FLOAT te = tIn_t[idxE];
+        FLOAT tn = tIn_t[idxN];
+        FLOAT ts = tIn_t[idxS];
+        FLOAT tb = tIn_t[idxB];
+        FLOAT tt = tIn_t[idxT];
+        tOut_t[c] = localCC * tc + localCW * tw + localCE * te + localCS * ts +
+                    localCN * tn + localCB * tb + localCT * tt +
+                    (localdt / localCap) * p + localCT * localAmb;
       }
     }
+#ifndef FUSE_OUTER_LOOPS
+  }
+#endif
 
 #else
 #pragma omp parallel for schedule(static)                                      \
@@ -227,15 +246,18 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
       }
     }
 #endif
+
 #ifdef GEM_FORGE
-    m5_work_end(0, 0);
+  m5_work_end(0, 0);
 #endif
-    FLOAT *t = tIn_t;
-    tIn_t = tOut_t;
-    tOut_t = t;
-    count++;
-  } while (count < numiter);
-  return;
+  FLOAT *t = tIn_t;
+  tIn_t = tOut_t;
+  tOut_t = t;
+  count++;
+}
+while (count < numiter)
+  ;
+return;
 }
 
 void usage(int argc, char **argv) {
@@ -279,9 +301,11 @@ int main(int argc, char **argv) {
 #endif
   int iterations = atoi(argv[3]);
   int numThreads = atoi(argv[4]);
+#ifndef FUSE_OUTER_LOOPS
   if (numThreads + 2 > layers) {
     numThreads = (layers > 2) ? (layers - 2) : 1;
   }
+#endif
 
   /* calculating parameters*/
 
@@ -299,40 +323,92 @@ int main(int argc, char **argv) {
 
   int size = numCols * numRows * layers;
 
-  FLOAT *powerIn = (FLOAT *)calloc(size, sizeof(FLOAT));
-  FLOAT *tempIn = (FLOAT *)calloc(size, sizeof(FLOAT));
-  FLOAT *tempOut = (FLOAT *)calloc(size, sizeof(FLOAT));
-
   omp_set_dynamic(0);
   omp_set_num_threads(numThreads);
   printf("%d threads running\n", omp_get_num_threads());
 
+  // FLOAT *powerIn = (FLOAT *)aligned_alloc(64, size * sizeof(FLOAT));
+  // FLOAT *tempIn = (FLOAT *)aligned_alloc(64, size * sizeof(FLOAT));
+  // FLOAT *tempOut = (FLOAT *)aligned_alloc(64, size * sizeof(FLOAT));
+
+  // Make tempOut offset by some pages.
+#ifndef OFFSET_BYTES
+#define OFFSET_BYTES 0
+#endif
+  const int OFFSET_ELEMENTS = OFFSET_BYTES / sizeof(FLOAT);
+  const int PAGE_SIZE = 4096;
+  const int CACHE_BLOCK_SIZE = 64;
+  int totalBytes = 3 * size * sizeof(FLOAT) + OFFSET_BYTES;
+  int numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; ++i) {
+    idx[i] = i;
+  }
+#ifdef RANDOMIZE
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int j = numPages - 1; j > 0; --j) {
+    int i = (int)(((float)(rand()) / (float)(RAND_MAX)) * j);
+    int tmp = idx[i];
+    idx[i] = idx[j];
+    idx[j] = tmp;
+  }
+#endif
+  FLOAT *Buffer =
+      (FLOAT *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
+  FLOAT *powerIn = Buffer + 0;
+  FLOAT *tempIn = Buffer + size;
+  FLOAT *tempOut = Buffer + size + size + OFFSET_ELEMENTS;
+
+  // Now we touch all the pages according to the index.
+  int elementsPerPage = PAGE_SIZE / sizeof(FLOAT);
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; i++) {
+    int pageIdx = idx[i];
+    int elementIdx = pageIdx * elementsPerPage;
+    volatile FLOAT v = Buffer[elementIdx];
+  }
+
 #ifdef GEM_FORGE
+
+  m5_stream_nuca_region(powerIn, sizeof(powerIn[0]), size);
+  m5_stream_nuca_region(tempIn, sizeof(tempIn[0]), size);
+  m5_stream_nuca_region(tempOut, sizeof(tempOut[0]), size);
+  m5_stream_nuca_align(powerIn, powerIn, numCols);
+  m5_stream_nuca_align(powerIn, powerIn, numCols * numRows);
+  m5_stream_nuca_align(tempIn, powerIn, 0);
+  m5_stream_nuca_align(tempOut, powerIn, 0);
+  m5_stream_nuca_remap();
+
   m5_detail_sim_start();
 #ifdef GEM_FORGE_WARM_CACHE
-#pragma omp parallel for schedule(static)                                      \
-    firstprivate(powerIn, tempIn, tempOut, layers, numRows, numCols)
-  for (uint64_t z = 0; z < layers; z++) {
-    for (uint64_t y = 0; y < numRows; y++) {
-      for (uint64_t x = 0; x < numCols; x += 64 / sizeof(FLOAT)) {
-        uint64_t c = x + y * numCols + z * numCols * numRows;
-        volatile FLOAT v1 = powerIn[c];
-        volatile FLOAT v2 = tempIn[c];
-        volatile FLOAT v3 = tempOut[c];
-      }
-    }
+  /**
+   * Warm them up separately.
+   */
+#define WARM_ARRAY(A)                                                          \
+  for (int64_t i = 0; i < size; i += 64 / sizeof(FLOAT)) {                     \
+    volatile FLOAT v = A[i];                                                   \
+  }
+  WARM_ARRAY(powerIn);
+  WARM_ARRAY(tempIn);
+  WARM_ARRAY(tempOut);
+#undef WARM_ARRAY
+  // Start the threads.
+#pragma omp parallel for schedule(static)
+  for (uint64_t z = 0; z < numThreads; z++) {
+    volatile FLOAT v1 = powerIn[z];
   }
   m5_reset_stats(0, 0);
 #endif
 #endif
+
   computeTempOMP(powerIn, tempIn, tempOut, numCols, numRows, layers, Cap, Rx,
                  Ry, Rz, dt, iterations);
 #ifdef GEM_FORGE
   m5_detail_sim_end();
   exit(0);
 #endif
-  free(tempIn);
-  free(tempOut);
-  free(powerIn);
-  return 0;
+  free(Buffer);
+  // free(tempIn);
+  // free(tempOut);
 }

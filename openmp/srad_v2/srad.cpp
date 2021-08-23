@@ -37,6 +37,22 @@ void usage(int argc, char **argv) {
   exit(1);
 }
 
+__attribute__((noinline)) void sumROI(float *J, int64_t cols, int64_t r1,
+                                      int64_t r2, int64_t c1, int64_t c2,
+                                      float *sum, float *sum2) {
+  float s = 0;
+  float s2 = 0;
+  for (int64_t i = r1; i <= r2; i++) {
+    for (int64_t j = c1; j <= c2; j++) {
+      float tmp = J[i * cols + j];
+      s += tmp;
+      s2 += tmp * tmp;
+    }
+  }
+  *sum = s;
+  *sum2 = s2;
+}
+
 int main(int argc, char *argv[]) {
   if (argc != 10) {
     usage(argc, argv);
@@ -56,24 +72,80 @@ int main(int argc, char *argv[]) {
   int niter = atoi(argv[9]);    // number of iterations
 
   uint64_t size_I = cols * rows;
-  uint64_t size_R = (r2 - r1 + 1) * (c2 - c1 + 1);
-
-  float *I = (float *)aligned_alloc(64, size_I * sizeof(float));
-  float *J = (float *)aligned_alloc(64, size_I * sizeof(float));
-  float *c = (float *)aligned_alloc(64, size_I * sizeof(float));
 
   /**
    * Store the intermediate results.
    * dN, dS, dW, dE.
    */
-  float *delta = (float *)aligned_alloc(64, sizeof(float) * size_I * 4);
-  float *deltaN = (float *)aligned_alloc(64, sizeof(float) * size_I);
-  float *deltaS = (float *)aligned_alloc(64, sizeof(float) * size_I);
-  float *deltaE = (float *)aligned_alloc(64, sizeof(float) * size_I);
-  float *deltaW = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  uint64_t size_R = (r2 - r1 + 1) * (c2 - c1 + 1);
 
-  printf("Randomizing the input matrix\n");
+  float *I = (float *)aligned_alloc(64, size_I * sizeof(float));
+  // float *J = (float *)aligned_alloc(64, size_I * sizeof(float));
+  // float *c = (float *)aligned_alloc(64, size_I * sizeof(float));
+  // float *delta = (float *)aligned_alloc(64, sizeof(float) * size_I * 4);
+  // float *deltaN = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  // float *deltaS = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  // float *deltaE = (float *)aligned_alloc(64, sizeof(float) * size_I);
+  // float *deltaW = (float *)aligned_alloc(64, sizeof(float) * size_I);
 
+  // Make delta offset by some pages.
+#ifndef OFFSET_BYTES
+#define OFFSET_BYTES 0
+#endif
+  const int OFFSET_ELEMENTS = OFFSET_BYTES / sizeof(float);
+  const int PAGE_SIZE = 4096;
+  const int CACHE_BLOCK_SIZE = 64;
+  const int size = size_I;
+  int totalBytes = 6 * size * sizeof(float) + OFFSET_BYTES;
+  int numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; ++i) {
+    idx[i] = i;
+  }
+#ifdef RANDOMIZE
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int j = numPages - 1; j > 0; --j) {
+    int i = (int)(((float)(rand()) / (float)(RAND_MAX)) * j);
+    int tmp = idx[i];
+    idx[i] = idx[j];
+    idx[j] = tmp;
+  }
+#endif
+  float *Buffer = (float *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
+  float *J = Buffer + 0;
+  float *c = J + size_I;
+  float *deltaN = c + size_I + OFFSET_ELEMENTS;
+  float *deltaS = deltaN + size_I;
+  float *deltaE = deltaS + size_I;
+  float *deltaW = deltaE + size_I;
+
+  // Now we touch all the pages according to the index.
+  int elementsPerPage = PAGE_SIZE / sizeof(float);
+#pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
+  for (int i = 0; i < numPages; i++) {
+    int pageIdx = idx[i];
+    int elementIdx = pageIdx * elementsPerPage;
+    volatile float v = Buffer[elementIdx];
+  }
+
+#ifdef GEM_FORGE
+  m5_stream_nuca_region(J, sizeof(J[0]), size_I);
+  m5_stream_nuca_region(c, sizeof(c[0]), size_I);
+  m5_stream_nuca_region(deltaN, sizeof(deltaN[0]), size_I);
+  m5_stream_nuca_region(deltaS, sizeof(deltaS[0]), size_I);
+  m5_stream_nuca_region(deltaE, sizeof(deltaE[0]), size_I);
+  m5_stream_nuca_region(deltaW, sizeof(deltaW[0]), size_I);
+  m5_stream_nuca_align(J, J, cols);
+  m5_stream_nuca_align(c, J, 0);
+  m5_stream_nuca_align(deltaN, J, 0);
+  m5_stream_nuca_align(deltaS, J, 0);
+  m5_stream_nuca_align(deltaE, J, 0);
+  m5_stream_nuca_align(deltaW, J, 0);
+  m5_stream_nuca_remap();
+#endif
+
+  // printf("Randomizing the input matrix\n");
   // random_matrix(I, rows, cols);
 
   // for (int k = 0; k < size_I; k++) {
@@ -116,13 +188,7 @@ int main(int argc, char *argv[]) {
   for (int iter = 0; iter < niter; iter++) {
     float sum = 0;
     float sum2 = 0;
-    for (int i = r1; i <= r2; i++) {
-      for (int j = c1; j <= c2; j++) {
-        float tmp = J[i * cols + j];
-        sum += tmp;
-        sum2 += tmp * tmp;
-      }
-    }
+    sumROI(J, cols, r1, r2, c1, c2, &sum, &sum2);
     float meanROI = sum / size_R;
     float varROI = (sum2 / size_R) - meanROI * meanROI;
     float q0sqr = varROI / (meanROI * meanROI);
@@ -131,7 +197,7 @@ int main(int argc, char *argv[]) {
     m5_work_begin(0, 0);
 #endif
 
-#pragma omp parallel for firstprivate(rows, cols) schedule(static)
+#pragma omp parallel for firstprivate(rows, cols, q0sqr) schedule(static)
     for (uint64_t i = 1; i < rows - 1; i++) {
 #pragma omp simd
 #ifdef GEM_FORGE_FIX_INPUT
@@ -173,13 +239,13 @@ int main(int argc, char *argv[]) {
 
         float L = (dNValue + dSValue + dWValue + dEValue) / Jc;
 
-        float num = (0.5 * G2) - ((1.0 / 16.0) * (L * L));
-        float den = 1 + (.25 * L);
+        float num = (0.5f * G2) - ((1.0f / 16.0f) * (L * L));
+        float den = 1.0f + (.25f * L);
         float qsqr = num / (den * den);
 
         // diffusion coefficent (equ 33)
-        den = (qsqr - q0sqr) / (q0sqr * (1 + q0sqr));
-        float cValue = 1.0 / (1.0 + den);
+        den = (qsqr - q0sqr) / (q0sqr * (1.0f + q0sqr));
+        float cValue = 1.0f / (1.0f + den);
         // saturate diffusion coefficent
         // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
         c[k] = cValue;
@@ -199,7 +265,15 @@ int main(int argc, char *argv[]) {
     m5_work_begin(1, 0);
 #endif
 
+/**
+ * We use dynamic schedule to avoid floated streams concentrated in one bank.
+ */
+#ifdef GEM_FORGE_DYN_SCHEDULE
+#pragma omp parallel for firstprivate(rows, cols, lambda)                      \
+    schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)
+#else
 #pragma omp parallel for firstprivate(rows, cols, lambda) schedule(static)
+#endif
     for (uint64_t i = 1; i < rows - 1; i++) {
 #ifdef GEM_FORGE_FIX_INPUT
 #pragma omp simd
@@ -243,14 +317,15 @@ int main(int argc, char *argv[]) {
 #endif
 
   free(I);
-  free(J);
-  free(delta);
-  free(deltaN);
-  free(deltaS);
-  free(deltaE);
-  free(deltaW);
+  // free(J);
+  // free(delta);
+  // free(deltaN);
+  // free(deltaS);
+  // free(deltaE);
+  // free(deltaW);
+  // free(c);
+  free(Buffer);
 
-  free(c);
   return 0;
 }
 
