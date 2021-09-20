@@ -24,6 +24,7 @@ void run(int argc, char **argv);
 
 int64_t rows, cols;
 int num_threads;
+int warm;
 int *wall;
 int *result;
 int *temp;
@@ -31,12 +32,13 @@ int *Buffer;
 #define M_SEED 9
 
 void init(int argc, char **argv) {
-  if (argc == 4) {
+  if (argc == 5) {
     cols = atoi(argv[1]);
     rows = atoi(argv[2]);
     num_threads = atoi(argv[3]);
+    warm = atoi(argv[4]);
   } else {
-    printf("Usage: pathfiner width num_of_steps num_of_threads\n");
+    printf("Usage: pathfiner width num_of_steps num_of_threads warm\n");
     exit(0);
   }
   // wall = reinterpret_cast<int *>(aligned_alloc(64, rows * cols *
@@ -52,7 +54,7 @@ void init(int argc, char **argv) {
   const int PAGE_SIZE = 4096;
   const int CACHE_BLOCK_SIZE = 64;
   const int64_t size = rows * cols;
-  int64_t totalBytes = (size + 2 * cols + 4) * sizeof(int) + OFFSET_BYTES;
+  int64_t totalBytes = (size + 4 * cols + 4) * sizeof(int) + OFFSET_BYTES;
   int64_t numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
   int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
 #pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
@@ -71,7 +73,10 @@ void init(int argc, char **argv) {
   Buffer = (int *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
   wall = Buffer + 0;
   temp = Buffer + size;
-  result = Buffer + size + cols + OFFSET_ELEMENTS;
+  /**
+   * We make temp and result has offset of 2 * cols to avoid DRAM xor channel.
+   */
+  result = Buffer + size + cols * 2 + OFFSET_ELEMENTS;
 
   // Now we touch all the pages according to the index.
   int elementsPerPage = PAGE_SIZE / sizeof(int);
@@ -136,11 +141,20 @@ __attribute__((noinline)) void pathfinder(int *src, int *dst) {
     m5_work_begin(0, 0);
 #endif
 
-#pragma omp parallel for firstprivate(cols, t) schedule(static)
+#pragma omp parallel for firstprivate(cols, t, src, dst, wall) schedule(static)
     for (int64_t n = 0; n < cols; n++) {
-      int min = MIN(src[n], MIN(src[n + 1], src[n + 2]));
+#pragma ss stream_name "rodinia.pathfinder.src.ld"
+      int src1 = src[n];
+#pragma ss stream_name "rodinia.pathfinder.src1.ld"
+      int src2 = src[n + 1];
+#pragma ss stream_name "rodinia.pathfinder.src2.ld"
+      int src3 = src[n + 2];
+#pragma ss stream_name "rodinia.pathfinder.wall.ld"
       int w = wall[t * cols + n];
-      dst[n + 1] = w + min;
+      int min = MIN(src1, MIN(src2, src3));
+      int v = w + min;
+#pragma ss stream_name "rodinia.pathfinder.dst.st"
+      dst[n + 1] = v;
     }
 
     // Expand the boundary values.
@@ -175,25 +189,30 @@ void run(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
+#endif
 
-#ifdef GEM_FORGE_WARM_CACHE
-  // Touch them to warm up.
-  for (int64_t n = 0; n < rows * cols; n += (64 / sizeof(int))) {
-    volatile int v = wall[n];
+  if (warm) {
+    // Touch them to warm up.
+    for (int64_t n = 0; n < rows * cols; n += (64 / sizeof(int))) {
+      volatile int v = wall[n];
+    }
+    for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
+      volatile int vs = src[n];
+    }
+    for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
+      volatile int vd = dst[n];
+    }
   }
-  for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
-    volatile int vs = src[n];
-  }
-  for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
-    volatile int vd = dst[n];
-  }
+
+  int p;
+  int *pp = &p;
 #pragma omp parallel for firstprivate(wall) schedule(static)
   for (int n = 0; n < num_threads; n++) {
-    volatile int v = wall[n];
+    volatile int v = *pp;
   }
-#endif
-  m5_reset_stats(0, 0);
 
+#ifdef GEM_FORGE
+  m5_reset_stats(0, 0);
 #endif
 
   pathfinder(src, dst);

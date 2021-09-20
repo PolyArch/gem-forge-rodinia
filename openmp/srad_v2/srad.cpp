@@ -14,6 +14,7 @@
 #include "gem5/m5ops.h"
 #ifdef GEM_FORGE_FIX_INPUT
 #define GEM_FORGE_FIX_COLS 2048
+#define GEM_FORGE_FIX_SPECKLE 128
 #endif
 #endif
 
@@ -23,7 +24,7 @@ void usage(int argc, char **argv) {
   fprintf(
       stderr,
       "Usage: %s <rows> <cols> <y1> <y2> <x1> <x2> <no. of threads> <lambda> "
-      "<no. of iter>\n",
+      "<no. of iter> <warm>\n",
       argv[0]);
   fprintf(stderr, "\t<rows>   - number of rows\n");
   fprintf(stderr, "\t<cols>    - number of cols\n");
@@ -34,6 +35,7 @@ void usage(int argc, char **argv) {
   fprintf(stderr, "\t<no. of threads>  - no. of threads\n");
   fprintf(stderr, "\t<lambda>   - lambda (0,1)\n");
   fprintf(stderr, "\t<no. of iter>   - number of iterations\n");
+  fprintf(stderr, "\t<warm>   - warm up the cache\n");
   exit(1);
 }
 
@@ -42,6 +44,16 @@ __attribute__((noinline)) void sumROI(float *J, int64_t cols, int64_t r1,
                                       float *sum, float *sum2) {
   float s = 0;
   float s2 = 0;
+#ifdef GEM_FORGE_FIX_INPUT
+  for (int64_t i = 0; i < GEM_FORGE_FIX_SPECKLE; i++) {
+#pragma clang loop vectorize(enable)
+    for (int64_t j = 0; j < GEM_FORGE_FIX_SPECKLE; j++) {
+      float tmp = J[i * cols + j];
+      s += tmp;
+      s2 += tmp * tmp;
+    }
+  }
+#else
   for (int64_t i = r1; i <= r2; i++) {
     for (int64_t j = c1; j <= c2; j++) {
       float tmp = J[i * cols + j];
@@ -49,12 +61,13 @@ __attribute__((noinline)) void sumROI(float *J, int64_t cols, int64_t r1,
       s2 += tmp * tmp;
     }
   }
+#endif
   *sum = s;
   *sum2 = s2;
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 10) {
+  if (argc != 11) {
     usage(argc, argv);
   }
   uint64_t rows = atoi(argv[1]); // number of rows in the domain
@@ -70,6 +83,7 @@ int main(int argc, char *argv[]) {
   int nthreads = atoi(argv[7]); // number of threads
   float lambda = atof(argv[8]); // Lambda value
   int niter = atoi(argv[9]);    // number of iterations
+  int warm = atoi(argv[10]);
 
   uint64_t size_I = cols * rows;
 
@@ -113,12 +127,12 @@ int main(int argc, char *argv[]) {
   }
 #endif
   float *Buffer = (float *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
-  float *J = Buffer + 0;
-  float *c = J + size_I;
-  float *deltaN = c + size_I + OFFSET_ELEMENTS;
-  float *deltaS = deltaN + size_I;
-  float *deltaE = deltaS + size_I;
-  float *deltaW = deltaE + size_I;
+  float *__restrict__ J = Buffer + 0;
+  float *__restrict__ c = J + size_I;
+  float *__restrict__ deltaN = c + size_I + OFFSET_ELEMENTS;
+  float *__restrict__ deltaS = deltaN + size_I;
+  float *__restrict__ deltaE = deltaS + size_I;
+  float *__restrict__ deltaW = deltaE + size_I;
 
   // Now we touch all the pages according to the index.
   int elementsPerPage = PAGE_SIZE / sizeof(float);
@@ -161,30 +175,34 @@ int main(int argc, char *argv[]) {
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
-#ifdef GEM_FORGE_WARM_CACHE
-  /**
-   * Warm them up separately to make sure paddr is continuous.
-   */
+#endif
+  if (warm) {
+    /**
+     * Warm them up separately to make sure paddr is continuous.
+     */
 #define WARM_ARRAY(A)                                                          \
   for (int64_t i = 0; i < rows * cols; i += 64 / sizeof(float)) {              \
     volatile float v = A[i];                                                   \
   }
-  WARM_ARRAY(J);
-  WARM_ARRAY(c);
-  WARM_ARRAY(deltaN);
-  WARM_ARRAY(deltaS);
-  WARM_ARRAY(deltaW);
-  WARM_ARRAY(deltaE);
+    WARM_ARRAY(J);
+    WARM_ARRAY(c);
+    WARM_ARRAY(deltaN);
+    WARM_ARRAY(deltaS);
+    WARM_ARRAY(deltaW);
+    WARM_ARRAY(deltaE);
 #undef WARM_ARRAY
+  }
 
 // Start the threads.
 #pragma omp parallel for firstprivate(rows, cols) schedule(static)
   for (uint64_t i = 0; i < nthreads; ++i) {
     volatile float vj = J[i];
   }
+
+#ifdef GEM_FORGE
   m5_reset_stats(0, 0);
 #endif
-#endif
+
   for (int iter = 0; iter < niter; iter++) {
     float sum = 0;
     float sum2 = 0;
@@ -193,13 +211,14 @@ int main(int argc, char *argv[]) {
     float varROI = (sum2 / size_R) - meanROI * meanROI;
     float q0sqr = varROI / (meanROI * meanROI);
 
+#ifndef DISABLE_KERNEL1
 #ifdef GEM_FORGE
     m5_work_begin(0, 0);
 #endif
 
 #pragma omp parallel for firstprivate(rows, cols, q0sqr) schedule(static)
     for (uint64_t i = 1; i < rows - 1; i++) {
-#pragma omp simd
+#pragma clang loop vectorize(assume_safety)
 #ifdef GEM_FORGE_FIX_INPUT
       for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
         uint64_t k = i * GEM_FORGE_FIX_COLS + j;
@@ -260,8 +279,14 @@ int main(int argc, char *argv[]) {
         deltaE[k] = dEValue;
       }
     }
+
 #ifdef GEM_FORGE
     m5_work_end(0, 0);
+#endif
+#endif // DISABLE_KERNEL1
+
+#ifndef DISABLE_KERNEL2
+#ifdef GEM_FORGE
     m5_work_begin(1, 0);
 #endif
 
@@ -308,6 +333,7 @@ int main(int argc, char *argv[]) {
     }
 #ifdef GEM_FORGE
     m5_work_end(1, 0);
+#endif
 #endif
   }
 
