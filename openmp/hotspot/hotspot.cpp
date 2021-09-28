@@ -63,8 +63,8 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
      * ! This will access one element outside the array, but I keep it so that
      * ! the inner-most loop is perfectly vectorizable.
      */
-#ifdef GEM_FORGE_FIX_INPUT
 #pragma omp simd
+#ifdef GEM_FORGE_FIX_INPUT
     for (uint64_t c = 0; c < GEM_FORGE_FIX_INPUT_SIZE; ++c) {
       uint64_t idx = r * GEM_FORGE_FIX_INPUT_SIZE + c;
       uint64_t idxS = idx + GEM_FORGE_FIX_INPUT_SIZE;
@@ -76,7 +76,6 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
       FLOAT Ry = 1.2;
       FLOAT Rz = 0.7;
 #else
-#pragma omp simd
     for (uint64_t c = 0; c < col; ++c) {
       uint64_t idx = r * col + c;
       uint64_t idxS = idx + col;
@@ -88,15 +87,22 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
 #endif
       uint64_t idxE = idx + 1;
       uint64_t idxW = idx - 1;
+#pragma ss stream_name "rodinia.hotspot.power.ld"
       FLOAT powerC = power[idx];
+#pragma ss stream_name "rodinia.hotspot.tempC.ld"
       FLOAT tempC = temp[idx];
+#pragma ss stream_name "rodinia.hotspot.tempS.ld"
       FLOAT tempS = temp[idxS];
+#pragma ss stream_name "rodinia.hotspot.tempN.ld"
       FLOAT tempN = temp[idxN];
+#pragma ss stream_name "rodinia.hotspot.tempE.ld"
       FLOAT tempE = temp[idxE];
+#pragma ss stream_name "rodinia.hotspot.tempW.ld"
       FLOAT tempW = temp[idxW];
       FLOAT delta =
           Cap * (powerC + (tempS + tempN - 2.f * tempC) * Ry +
                  (tempE + tempW - 2.f * tempC) * Rx + (amb_temp - tempC) * Rz);
+#pragma ss stream_name "rodinia.hotspot.result.st"
       result[idx] = tempC + delta;
     }
   }
@@ -154,7 +160,7 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
  * and solves the difference equations by iterating
  */
 void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
-                       FLOAT *power, int row, int col) {
+                       FLOAT *power, int row, int col, int warm) {
   FLOAT grid_height = chip_height / row;
   FLOAT grid_width = chip_width / col;
 
@@ -173,26 +179,28 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
-#ifdef GEM_FORGE_WARM_CACHE
-  /**
-   * Warm up like this to make paddr continuous.
-   */
-  for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
-    volatile FLOAT vr = result[i];
-  }
-  for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
-    volatile FLOAT vr = temp[i];
-  }
-  for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
-    volatile FLOAT vr = power[i];
+#endif
+  if (warm) {
+    /**
+     * Warm up like this to make paddr continuous.
+     */
+    for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
+      volatile FLOAT vr = result[i];
+    }
+    for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
+      volatile FLOAT vr = temp[i];
+    }
+    for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
+      volatile FLOAT vr = power[i];
+    }
   }
   // Start the threads.
 #pragma omp parallel for schedule(static)
   for (uint64_t r = 0; r < num_omp_threads; ++r) {
     volatile FLOAT vr = result[r];
   }
+#ifdef GEM_FORGE
   m5_reset_stats(0, 0);
-#endif
 #endif
 
   FLOAT *r = result;
@@ -235,7 +243,7 @@ void read_input(FLOAT *vect, int grid_rows, int grid_cols, char *file) {
 void usage(int argc, char **argv) {
   fprintf(stderr,
           "Usage: %s <grid_rows> <grid_cols> <sim_time> <no. of "
-          "threads><temp_file> <power_file>\n",
+          "threads> <temp_file> <power_file> <output_file> <warm>\n",
           argv[0]);
   fprintf(stderr,
           "\t<grid_rows>  - number of rows in the grid (positive integer)\n");
@@ -249,19 +257,22 @@ void usage(int argc, char **argv) {
   fprintf(stderr, "\t<power_file> - name of the file containing the dissipated "
                   "power values of each cell\n");
   fprintf(stderr, "\t<output_file> - name of the output file\n");
+  fprintf(stderr, "\t<warm> - Whether to warm up the cache\n");
   exit(1);
 }
 
 int main(int argc, char **argv) {
-  int grid_rows, grid_cols, sim_time, i;
+  int grid_rows, grid_cols, sim_time;
   char *tfile, *pfile, *ofile;
 
   /* check validity of inputs	*/
-  if (argc != 8)
+  if (argc != 9)
     usage(argc, argv);
   if ((grid_rows = atoi(argv[1])) <= 0 || (grid_cols = atoi(argv[2])) <= 0 ||
       (sim_time = atoi(argv[3])) <= 0 || (num_omp_threads = atoi(argv[4])) <= 0)
     usage(argc, argv);
+
+  int warm = atoi(argv[8]);
 
 #ifdef GEM_FORGE_FIX_INPUT
   if (grid_cols != GEM_FORGE_FIX_INPUT_SIZE) {
@@ -269,11 +280,6 @@ int main(int argc, char **argv) {
     exit(1);
   }
 #endif
-
-  /* allocate memory for the temperature and power arrays	*/
-  // FLOAT *temp = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
-  // FLOAT *power = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
-  // FLOAT *result = (FLOAT *)aligned_alloc(64, grid_rows * grid_cols * sizeof(FLOAT));
 
   // Make result offset by some pages.
 #ifndef OFFSET_BYTES
@@ -299,8 +305,7 @@ int main(int argc, char **argv) {
     idx[j] = tmp;
   }
 #endif
-  FLOAT *Buffer =
-      (FLOAT *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
+  FLOAT *Buffer = (FLOAT *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
   FLOAT *temp = Buffer + 0;
   FLOAT *power = Buffer + size;
   FLOAT *result = Buffer + size + size + OFFSET_ELEMENTS;
@@ -347,7 +352,7 @@ int main(int argc, char **argv) {
   // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
 
-  compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols);
+  compute_tran_temp(result, sim_time, temp, power, grid_rows, grid_cols, warm);
   /* cleanup	*/
   // free(temp);
   // free(power);

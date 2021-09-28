@@ -48,6 +48,7 @@ __attribute__((noinline)) void sumROI(float *J, int64_t cols, int64_t r1,
   for (int64_t i = 0; i < GEM_FORGE_FIX_SPECKLE; i++) {
 #pragma clang loop vectorize(enable)
     for (int64_t j = 0; j < GEM_FORGE_FIX_SPECKLE; j++) {
+#pragma ss stream_name "rodinia.srad_v2.sumROI.ld"
       float tmp = J[i * cols + j];
       s += tmp;
       s2 += tmp * tmp;
@@ -246,11 +247,22 @@ int main(int argc, char *argv[]) {
          */
 
         // directional derivates
+
+#pragma ss stream_name "rodinia.srad_v2.Jc.ld"
         float Jc = J[k];
-        float dWValue = J[k - 1] - Jc;
-        float dEValue = J[k + 1] - Jc;
-        float dNValue = J[kN] - Jc;
-        float dSValue = J[kS] - Jc;
+#pragma ss stream_name "rodinia.srad_v2.Jw.ld"
+        float Jw = J[k - 1];
+#pragma ss stream_name "rodinia.srad_v2.Je.ld"
+        float Je = J[k + 1];
+#pragma ss stream_name "rodinia.srad_v2.Jn.ld"
+        float Jn = J[kN];
+#pragma ss stream_name "rodinia.srad_v2.Js.ld"
+        float Js = J[kS];
+
+        float dWValue = Jw - Jc;
+        float dEValue = Je - Jc;
+        float dNValue = Jn - Jc;
+        float dSValue = Js - Jc;
 
         float G2 = (dNValue * dNValue + dSValue * dSValue + dWValue * dWValue +
                     dEValue * dEValue) /
@@ -267,15 +279,22 @@ int main(int argc, char *argv[]) {
         float cValue = 1.0f / (1.0f + den);
         // saturate diffusion coefficent
         // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
+
+#pragma ss stream_name "rodinia.srad_v2.c.st"
         c[k] = cValue;
         // uint64_t dk = i * cols * 4 + j * 4;
         // delta[dk + 0] = dNValue;
         // delta[dk + 1] = dSValue;
         // delta[dk + 2] = dWValue;
         // delta[dk + 3] = dEValue;
+
+#pragma ss stream_name "rodinia.srad_v2.deltaN.st"
         deltaN[k] = dNValue;
+#pragma ss stream_name "rodinia.srad_v2.deltaS.st"
         deltaS[k] = dSValue;
+#pragma ss stream_name "rodinia.srad_v2.deltaW.st"
         deltaW[k] = dWValue;
+#pragma ss stream_name "rodinia.srad_v2.deltaE.st"
         deltaE[k] = dEValue;
       }
     }
@@ -313,22 +332,37 @@ int main(int argc, char *argv[]) {
         // ! Accessing j + 1.
         // Out of bound.
         // diffusion coefficent
+
+#pragma ss stream_name "rodinia.srad_v2.cN.ld"
         float cN = c[k];
+#pragma ss stream_name "rodinia.srad_v2.cS.ld"
         float cS = c[kS];
-        float cW = cN;
+#pragma ss stream_name "rodinia.srad_v2.cE.ld"
         float cE = c[k + 1];
+        float cW = cN;
+
         // divergence (equ 58)
+#pragma ss stream_name "rodinia.srad_v2.deltaN.ld"
         float dNValue = deltaN[k];
+#pragma ss stream_name "rodinia.srad_v2.deltaS.ld"
         float dSValue = deltaS[k];
+#pragma ss stream_name "rodinia.srad_v2.deltaW.ld"
         float dWValue = deltaW[k];
+#pragma ss stream_name "rodinia.srad_v2.deltaE.ld"
         float dEValue = deltaE[k];
+
         float D = cN * dNValue + cS * dSValue + cW * dWValue + cE * dEValue;
 
         // image update (equ 61)
         // J[k] = J[k] + 0.25f * lambda * D;
         // ! GemForge
         // Fix lambda to reduce the number of input for the computation.
-        J[k] = J[k] + 0.25f * D;
+
+#pragma ss stream_name "rodinia.srad_v2.Jc2.ld"
+        float Jc = J[k];
+
+#pragma ss stream_name "rodinia.srad_v2.J.st"
+        J[k] = Jc + 0.25f * D;
       }
     }
 #ifdef GEM_FORGE

@@ -142,7 +142,7 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
      * ! but we leave it there to have perfect vectorization.
      */
 
-#if defined(FIX_ROW) && defined(FIX_COL) && defined(FIX_Z)
+#if defined(FIX_ROW) && defined(FIX_COL)
 #define ROW_SIZE FIX_ROW
 #define COL_SIZE FIX_COL
 #define MAT_SIZE (ROW_SIZE * COL_SIZE)
@@ -150,26 +150,26 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
 #ifdef FUSE_OUTER_LOOPS
 
 #define START_ROW ROW_SIZE
-#define END_ROW ((FIX_Z - 1) * ROW_SIZE)
+    uint64_t END_ROW = (nz - 1) * ROW_SIZE;
 
 #ifdef GEM_FORGE_DYN_SCHEDULE
 #pragma omp parallel for schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)             \
     firstprivate(tIn_t, pIn, tOut_t)
 #else
 #pragma omp parallel for schedule(static) firstprivate(tIn_t, pIn, tOut_t)
-#endif
+#endif // GEM_FORGE_DYN_SCHEDULE
     for (uint64_t row = START_ROW; row < END_ROW; ++row) {
 #pragma omp simd
       for (uint64_t x = 0; x < COL_SIZE; x++) {
         uint64_t c = x + row * COL_SIZE;
 #else
-#pragma omp parallel for schedule(static) firstprivate(tIn_t, pIn, tOut_t)
-    for (uint64_t z = 1; z < FIX_Z - 1; z++) {
+#pragma omp parallel for schedule(static) firstprivate(nz, tIn_t, pIn, tOut_t)
+    for (uint64_t z = 1; z < nz - 1; z++) {
       for (uint64_t y = 0; y < ROW_SIZE; y++) {
 #pragma omp simd
         for (uint64_t x = 0; x < COL_SIZE; x++) {
           uint64_t c = x + y * COL_SIZE + z * MAT_SIZE;
-#endif
+#endif // FUSE_OUTER_LOOPS
 
         uint64_t idxT = c - MAT_SIZE;
         uint64_t idxB = c + MAT_SIZE;
@@ -188,14 +188,23 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
         FLOAT localAmb = 0.7;
         uint64_t idxW = c - 1;
         uint64_t idxE = c + 1;
+#pragma ss stream_name "rodinia.hotspot3D.power.ld"
         FLOAT p = pIn[c];
+#pragma ss stream_name "rodinia.hotspot3D.tc.ld"
         FLOAT tc = tIn_t[c];
+#pragma ss stream_name "rodinia.hotspot3D.tw.ld"
         FLOAT tw = tIn_t[idxW];
+#pragma ss stream_name "rodinia.hotspot3D.te.ld"
         FLOAT te = tIn_t[idxE];
+#pragma ss stream_name "rodinia.hotspot3D.tn.ld"
         FLOAT tn = tIn_t[idxN];
+#pragma ss stream_name "rodinia.hotspot3D.ts.ld"
         FLOAT ts = tIn_t[idxS];
+#pragma ss stream_name "rodinia.hotspot3D.tb.ld"
         FLOAT tb = tIn_t[idxB];
+#pragma ss stream_name "rodinia.hotspot3D.tt.ld"
         FLOAT tt = tIn_t[idxT];
+#pragma ss stream_name "rodinia.hotspot3D.out.st"
         tOut_t[c] = localCC * tc + localCW * tw + localCE * te + localCS * ts +
                     localCN * tn + localCB * tb + localCT * tt +
                     (localdt / localCap) * p + localCT * localAmb;
@@ -261,11 +270,11 @@ return;
 }
 
 void usage(int argc, char **argv) {
-  fprintf(stderr,
-          "Usage: %s <rows/cols> <layers> <iterations> <nthreads> <powerFile> "
-          "<tempFile> "
-          "<outputFile>\n",
-          argv[0]);
+  fprintf(
+      stderr,
+      "Usage: %s <rows> <cols> <layers> <iterations> <nthreads> <powerFile> "
+      "<tempFile> <outputFile> <warm>\n",
+      argv[0]);
   fprintf(
       stderr,
       "\t<rows/cols>  - number of rows/cols in the grid (positive integer)\n");
@@ -278,32 +287,37 @@ void usage(int argc, char **argv) {
                   "power values of each cell\n");
   fprintf(stderr, "\t<tempFile>  - name of the file containing the initial "
                   "temperature values of each cell\n");
-  fprintf(stderr, "\t<outputFile - output file\n");
+  fprintf(stderr, "\t<outputFile> - output file\n");
+  fprintf(stderr, "\t<warm> - whether to warm up the cache\n");
   exit(1);
 }
 
 int main(int argc, char **argv) {
-  if (argc != 8) {
+  if (argc != 10) {
     usage(argc, argv);
   }
 
-  char *pfile = argv[5];
-  char *tfile = argv[6];
-  char *ofile = argv[7];
-#if defined(FIX_ROW) && defined(FIX_COL) && defined(FIX_Z)
-  int numCols = FIX_COL;
-  int numRows = FIX_ROW;
-  int layers = FIX_Z;
-#else
-  int numCols = atoi(argv[1]);
   int numRows = atoi(argv[1]);
-  int layers = atoi(argv[2]);
-#endif
-  int iterations = atoi(argv[3]);
-  int numThreads = atoi(argv[4]);
+  int numCols = atoi(argv[2]);
+  int layers = atoi(argv[3]);
+  int iterations = atoi(argv[4]);
+  int numThreads = atoi(argv[5]);
+  char *pfile = argv[6];
+  char *tfile = argv[7];
+  char *ofile = argv[8];
+  int warm = atoi(argv[9]);
+
 #ifndef FUSE_OUTER_LOOPS
   if (numThreads + 2 > layers) {
     numThreads = (layers > 2) ? (layers - 2) : 1;
+  }
+#endif
+
+#if defined(FIX_ROW) && defined(FIX_COL)
+  if (numCols != FIX_COL || numRows != FIX_ROW) {
+    printf("Mismatch Fixed Dimension %dx%d != Input %dx%d.\n", FIX_ROW, FIX_COL,
+           numRows, numCols);
+    assert(0);
   }
 #endif
 
@@ -325,11 +339,7 @@ int main(int argc, char **argv) {
 
   omp_set_dynamic(0);
   omp_set_num_threads(numThreads);
-  printf("%d threads running\n", omp_get_num_threads());
-
-  // FLOAT *powerIn = (FLOAT *)aligned_alloc(64, size * sizeof(FLOAT));
-  // FLOAT *tempIn = (FLOAT *)aligned_alloc(64, size * sizeof(FLOAT));
-  // FLOAT *tempOut = (FLOAT *)aligned_alloc(64, size * sizeof(FLOAT));
+  printf("Size %dx%dx%d. Threads %d\n", numRows, numCols, layers, numThreads);
 
   // Make tempOut offset by some pages.
 #ifndef OFFSET_BYTES
@@ -354,8 +364,7 @@ int main(int argc, char **argv) {
     idx[j] = tmp;
   }
 #endif
-  FLOAT *Buffer =
-      (FLOAT *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
+  FLOAT *Buffer = (FLOAT *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
   FLOAT *powerIn = Buffer + 0;
   FLOAT *tempIn = Buffer + size;
   FLOAT *tempOut = Buffer + size + size + OFFSET_ELEMENTS;
@@ -370,7 +379,6 @@ int main(int argc, char **argv) {
   }
 
 #ifdef GEM_FORGE
-
   m5_stream_nuca_region(powerIn, sizeof(powerIn[0]), size);
   m5_stream_nuca_region(tempIn, sizeof(tempIn[0]), size);
   m5_stream_nuca_region(tempOut, sizeof(tempOut[0]), size);
@@ -379,27 +387,34 @@ int main(int argc, char **argv) {
   m5_stream_nuca_align(tempIn, powerIn, 0);
   m5_stream_nuca_align(tempOut, powerIn, 0);
   m5_stream_nuca_remap();
+#endif
 
+#ifdef GEM_FORGE
   m5_detail_sim_start();
-#ifdef GEM_FORGE_WARM_CACHE
-  /**
-   * Warm them up separately.
-   */
+#endif
+
+  if (warm) {
+    /**
+     * Warm them up separately.
+     */
 #define WARM_ARRAY(A)                                                          \
   for (int64_t i = 0; i < size; i += 64 / sizeof(FLOAT)) {                     \
     volatile FLOAT v = A[i];                                                   \
   }
-  WARM_ARRAY(powerIn);
-  WARM_ARRAY(tempIn);
-  WARM_ARRAY(tempOut);
+    WARM_ARRAY(powerIn);
+    WARM_ARRAY(tempIn);
+    WARM_ARRAY(tempOut);
 #undef WARM_ARRAY
+  }
+
   // Start the threads.
 #pragma omp parallel for schedule(static)
   for (uint64_t z = 0; z < numThreads; z++) {
     volatile FLOAT v1 = powerIn[z];
   }
+
+#ifdef GEM_FORGE
   m5_reset_stats(0, 0);
-#endif
 #endif
 
   computeTempOMP(powerIn, tempIn, tempOut, numCols, numRows, layers, Cap, Rx,

@@ -8,7 +8,7 @@ all: bfs.exe
 riscv: raw.riscv.exe
 
 3D.bc: 3D.c
-	$(CC) $(CC_FLAGS) -march=knl -DFIX_ROW=256 -DFIX_COL=1024 -DFIX_Z=8 -DFUSE_OUTER_LOOPS -DRANDOMIZE $^ -emit-llvm -c -o $@
+	$(CC) $(CC_FLAGS) -march=knl -DFIX_ROW=256 -DFIX_COL=1024 -DFUSE_OUTER_LOOPS -DRANDOMIZE $^ -emit-llvm -c -o $@
 
 raw.bc: 3D.bc
 	llvm-link $^ -o $@
