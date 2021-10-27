@@ -142,37 +142,38 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
      * ! but we leave it there to have perfect vectorization.
      */
 
-#if defined(FIX_ROW) && defined(FIX_COL)
-#define ROW_SIZE FIX_ROW
+#if defined(FIX_COL)
 #define COL_SIZE FIX_COL
-#define MAT_SIZE (ROW_SIZE * COL_SIZE)
+
+    uint64_t matSize = ny * COL_SIZE;
 
 #ifdef FUSE_OUTER_LOOPS
-
-#define START_ROW ROW_SIZE
-    uint64_t END_ROW = (nz - 1) * ROW_SIZE;
+    uint64_t startRow = ny;
+    uint64_t endRow = (nz - 1) * ny;
 
 #ifdef GEM_FORGE_DYN_SCHEDULE
 #pragma omp parallel for schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)             \
-    firstprivate(tIn_t, pIn, tOut_t)
+    firstprivate(tIn_t, pIn, tOut_t, matSize)
 #else
-#pragma omp parallel for schedule(static) firstprivate(tIn_t, pIn, tOut_t)
+#pragma omp parallel for schedule(static)                                      \
+    firstprivate(tIn_t, pIn, tOut_t, matSize)
 #endif // GEM_FORGE_DYN_SCHEDULE
-    for (uint64_t row = START_ROW; row < END_ROW; ++row) {
+    for (uint64_t row = startRow; row < endRow; ++row) {
 #pragma omp simd
       for (uint64_t x = 0; x < COL_SIZE; x++) {
         uint64_t c = x + row * COL_SIZE;
 #else
-#pragma omp parallel for schedule(static) firstprivate(nz, tIn_t, pIn, tOut_t)
+#pragma omp parallel for schedule(static)                                      \
+    firstprivate(nz, tIn_t, pIn, tOut_t, matSize)
     for (uint64_t z = 1; z < nz - 1; z++) {
-      for (uint64_t y = 0; y < ROW_SIZE; y++) {
+      for (uint64_t y = 0; y < ny; y++) {
 #pragma omp simd
         for (uint64_t x = 0; x < COL_SIZE; x++) {
-          uint64_t c = x + y * COL_SIZE + z * MAT_SIZE;
+          uint64_t c = x + y * COL_SIZE + z * matSize;
 #endif // FUSE_OUTER_LOOPS
 
-        uint64_t idxT = c - MAT_SIZE;
-        uint64_t idxB = c + MAT_SIZE;
+        uint64_t idxT = c - matSize;
+        uint64_t idxB = c + matSize;
         uint64_t idxN = c - COL_SIZE;
         uint64_t idxS = c + COL_SIZE;
         // Use fixed immediate.
@@ -313,9 +314,9 @@ int main(int argc, char **argv) {
   }
 #endif
 
-#if defined(FIX_ROW) && defined(FIX_COL)
-  if (numCols != FIX_COL || numRows != FIX_ROW) {
-    printf("Mismatch Fixed Dimension %dx%d != Input %dx%d.\n", FIX_ROW, FIX_COL,
+#if defined(FIX_COL)
+  if (numCols != FIX_COL) {
+    printf("Mismatch Fixed Dimension %dx%d != Input %dx%d.\n", numRows, FIX_COL,
            numRows, numCols);
     assert(0);
   }
@@ -379,9 +380,9 @@ int main(int argc, char **argv) {
   }
 
 #ifdef GEM_FORGE
-  m5_stream_nuca_region(powerIn, sizeof(powerIn[0]), size);
-  m5_stream_nuca_region(tempIn, sizeof(tempIn[0]), size);
-  m5_stream_nuca_region(tempOut, sizeof(tempOut[0]), size);
+  m5_stream_nuca_region("rodinia.hotspot3D.powerIn", powerIn, sizeof(powerIn[0]), size);
+  m5_stream_nuca_region("rodinia.hotspot3D.tempIn", tempIn, sizeof(tempIn[0]), size);
+  m5_stream_nuca_region("rodinia.hotspot3D.tempOut", tempOut, sizeof(tempOut[0]), size);
   m5_stream_nuca_align(powerIn, powerIn, numCols);
   m5_stream_nuca_align(powerIn, powerIn, numCols * numRows);
   m5_stream_nuca_align(tempIn, powerIn, 0);

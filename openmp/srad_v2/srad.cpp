@@ -145,12 +145,12 @@ int main(int argc, char *argv[]) {
   }
 
 #ifdef GEM_FORGE
-  m5_stream_nuca_region(J, sizeof(J[0]), size_I);
-  m5_stream_nuca_region(c, sizeof(c[0]), size_I);
-  m5_stream_nuca_region(deltaN, sizeof(deltaN[0]), size_I);
-  m5_stream_nuca_region(deltaS, sizeof(deltaS[0]), size_I);
-  m5_stream_nuca_region(deltaE, sizeof(deltaE[0]), size_I);
-  m5_stream_nuca_region(deltaW, sizeof(deltaW[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v2.J", J, sizeof(J[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v2.c", c, sizeof(c[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v2.deltaN", deltaN, sizeof(deltaN[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v2.deltaS", deltaS, sizeof(deltaS[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v2.deltaE", deltaE, sizeof(deltaE[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v2.deltaW", deltaW, sizeof(deltaW[0]), size_I);
   m5_stream_nuca_align(J, J, cols);
   m5_stream_nuca_align(c, J, 0);
   m5_stream_nuca_align(deltaN, J, 0);
