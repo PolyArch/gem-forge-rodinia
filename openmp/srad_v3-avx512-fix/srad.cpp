@@ -93,7 +93,8 @@ int main(int argc, char *argv[]) {
   uint64_t rows = atoi(argv[1]); // number of rows in the domain
   uint64_t cols = atoi(argv[2]); // number of cols in the domain
   if ((rows % 16 != 0) || (cols % 16 != 0)) {
-    fprintf(stderr, "rows and cols must be multiples of 16\n");
+    fprintf(stderr, "rows and cols %lu %lu must be multiples of 16\n", rows,
+            cols);
     exit(1);
   }
   int r1 = atoi(argv[3]);       // y1 position of the speckle
@@ -130,7 +131,7 @@ int main(int argc, char *argv[]) {
   const int PAGE_SIZE = 4096;
   const int CACHE_BLOCK_SIZE = 64;
   const int size = size_I;
-  int totalBytes = 6 * size * sizeof(float) + OFFSET_BYTES;
+  int totalBytes = 3 * size * sizeof(float) + OFFSET_BYTES;
   int numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
   int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
 #pragma clang loop vectorize(disable) unroll(disable) interleave(disable)
@@ -147,12 +148,9 @@ int main(int argc, char *argv[]) {
   }
 #endif
   float *Buffer = (float *)aligned_alloc(PAGE_SIZE, numPages * PAGE_SIZE);
-  float *__restrict__ J = Buffer + 0;
-  float *__restrict__ c = J + size_I;
-  float *__restrict__ deltaN = c + size_I + OFFSET_ELEMENTS;
-  float *__restrict__ deltaS = deltaN + size_I;
-  float *__restrict__ deltaE = deltaS + size_I;
-  float *__restrict__ deltaW = deltaE + size_I;
+  float *__restrict__ J1 = Buffer + 0;
+  float *__restrict__ c = J1 + size_I;
+  float *__restrict__ J2 = c + size_I + OFFSET_ELEMENTS;
 
   // Now we touch all the pages according to the index.
   int elementsPerPage = PAGE_SIZE / sizeof(float);
@@ -164,58 +162,49 @@ int main(int argc, char *argv[]) {
   }
 
 #ifdef GEM_FORGE
-  m5_stream_nuca_region("rodinia.srad_v2.J", J, sizeof(J[0]), size_I);
-  m5_stream_nuca_region("rodinia.srad_v2.c", c, sizeof(c[0]), size_I);
-  m5_stream_nuca_region("rodinia.srad_v2.deltaN", deltaN, sizeof(deltaN[0]),
-                        size_I);
-  m5_stream_nuca_region("rodinia.srad_v2.deltaS", deltaS, sizeof(deltaS[0]),
-                        size_I);
-  m5_stream_nuca_region("rodinia.srad_v2.deltaE", deltaE, sizeof(deltaE[0]),
-                        size_I);
-  m5_stream_nuca_region("rodinia.srad_v2.deltaW", deltaW, sizeof(deltaW[0]),
-                        size_I);
-  m5_stream_nuca_align(J, J, cols);
-  m5_stream_nuca_align(c, J, 0);
-  m5_stream_nuca_align(deltaN, J, 0);
-  m5_stream_nuca_align(deltaS, J, 0);
-  m5_stream_nuca_align(deltaE, J, 0);
-  m5_stream_nuca_align(deltaW, J, 0);
+  m5_stream_nuca_region("rodinia.srad_v3.J1", J1, sizeof(J1[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v3.J2", J2, sizeof(J2[0]), size_I);
+  m5_stream_nuca_region("rodinia.srad_v3.c", c, sizeof(c[0]), size_I);
+  m5_stream_nuca_align(J1, J1, cols);
+  m5_stream_nuca_align(J2, J1, 0);
+  m5_stream_nuca_align(c, J1, 0);
   m5_stream_nuca_remap();
 #endif
 
   omp_set_num_threads(nthreads);
   kmp_set_stacksize_s(8 * 1024 * 1024);
+#ifdef GEM_FORGE
+  // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
+#endif
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();
 #endif
   if (warm) {
 #ifdef GEM_FORGE
-    gf_warm_array("J", J, sizeof(J[0]) * size_I);
+    gf_warm_array("J1", J1, sizeof(J1[0]) * size_I);
+    gf_warm_array("J2", J2, sizeof(J2[0]) * size_I);
     gf_warm_array("c", c, sizeof(c[0]) * size_I);
-    gf_warm_array("deltaN", deltaN, sizeof(deltaN[0]) * size_I);
-    gf_warm_array("deltaS", deltaS, sizeof(deltaS[0]) * size_I);
-    gf_warm_array("deltaW", deltaW, sizeof(deltaW[0]) * size_I);
-    gf_warm_array("deltaE", deltaE, sizeof(deltaE[0]) * size_I);
 #else
 #define WARM_ARRAY(A)                                                          \
   for (int64_t i = 0; i < rows * cols; i += 64 / sizeof(float)) {              \
     volatile float v = A[i];                                                   \
   }
-    WARM_ARRAY(J);
+    WARM_ARRAY(J1);
     WARM_ARRAY(c);
-    WARM_ARRAY(deltaN);
-    WARM_ARRAY(deltaS);
-    WARM_ARRAY(deltaW);
-    WARM_ARRAY(deltaE);
+    WARM_ARRAY(J2);
 #undef WARM_ARRAY
 #endif
   }
 
-// Start the threads.
+  // Start the threads.
+  {
+    float v;
+    float *pv = &v;
 #pragma omp parallel for firstprivate(rows, cols) schedule(static)
-  for (uint64_t i = 0; i < nthreads; ++i) {
-    volatile float vj = J[i];
+    for (uint64_t i = 0; i < nthreads; ++i) {
+      volatile float vj = *pv;
+    }
   }
 
 #ifdef GEM_FORGE
@@ -223,9 +212,17 @@ int main(int argc, char *argv[]) {
 #endif
 
   for (int iter = 0; iter < niter; iter++) {
+
+    /**
+     * Swap J1 and J2.
+     */
+    float *tmp = J1;
+    J1 = J2;
+    J2 = J1;
+
     float sum = 0;
     float sum2 = 0;
-    sumROI(J, cols, r1, r2, c1, c2, &sum, &sum2);
+    sumROI(J1, cols, r1, r2, c1, c2, &sum, &sum2);
     float meanROI = sum / size_R;
     float varROI = (sum2 / size_R) - meanROI * meanROI;
     float q0sqr = varROI / (meanROI * meanROI);
@@ -266,16 +263,16 @@ int main(int argc, char *argv[]) {
 
         // directional derivates
 
-#pragma ss stream_name "rodinia.srad_v2.Jc.ld"
-        float Jc = J[k];
-#pragma ss stream_name "rodinia.srad_v2.Jw.ld"
-        float Jw = J[k - 1];
-#pragma ss stream_name "rodinia.srad_v2.Je.ld"
-        float Je = J[k + 1];
-#pragma ss stream_name "rodinia.srad_v2.Jn.ld"
-        float Jn = J[kN];
-#pragma ss stream_name "rodinia.srad_v2.Js.ld"
-        float Js = J[kS];
+#pragma ss stream_name "rodinia.srad_v3.1.Jc.ld"
+        float Jc = J1[k];
+#pragma ss stream_name "rodinia.srad_v3.1.Jw.ld"
+        float Jw = J1[k - 1];
+#pragma ss stream_name "rodinia.srad_v3.1.Je.ld"
+        float Je = J1[k + 1];
+#pragma ss stream_name "rodinia.srad_v3.1.Jn.ld"
+        float Jn = J1[kN];
+#pragma ss stream_name "rodinia.srad_v3.1.Js.ld"
+        float Js = J1[kS];
 
         float dWValue = Jw - Jc;
         float dEValue = Je - Jc;
@@ -298,22 +295,8 @@ int main(int argc, char *argv[]) {
         // saturate diffusion coefficent
         // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
 
-#pragma ss stream_name "rodinia.srad_v2.c.st"
+#pragma ss stream_name "rodinia.srad_v3.1.c.st"
         c[k] = cValue;
-        // uint64_t dk = i * cols * 4 + j * 4;
-        // delta[dk + 0] = dNValue;
-        // delta[dk + 1] = dSValue;
-        // delta[dk + 2] = dWValue;
-        // delta[dk + 3] = dEValue;
-
-#pragma ss stream_name "rodinia.srad_v2.deltaN.st"
-        deltaN[k] = dNValue;
-#pragma ss stream_name "rodinia.srad_v2.deltaS.st"
-        deltaS[k] = dSValue;
-#pragma ss stream_name "rodinia.srad_v2.deltaW.st"
-        deltaW[k] = dWValue;
-#pragma ss stream_name "rodinia.srad_v2.deltaE.st"
-        deltaE[k] = dEValue;
       }
     }
 
@@ -341,34 +324,43 @@ int main(int argc, char *argv[]) {
 #pragma omp simd
       for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
         uint64_t k = i * GEM_FORGE_FIX_COLS + j;
+        uint64_t kN = k - GEM_FORGE_FIX_COLS;
         uint64_t kS = k + GEM_FORGE_FIX_COLS;
 #else
       for (uint64_t j = 0; j < cols; j++) {
         uint64_t k = i * cols + j;
+        uint64_t kN = k - cols;
         uint64_t kS = k + cols;
 #endif
         // ! Accessing j + 1.
         // Out of bound.
         // diffusion coefficent
 
-#pragma ss stream_name "rodinia.srad_v2.cN.ld"
+#pragma ss stream_name "rodinia.srad_v3.2.cN.ld"
         float cN = c[k];
-#pragma ss stream_name "rodinia.srad_v2.cS.ld"
+#pragma ss stream_name "rodinia.srad_v3.2.cS.ld"
         float cS = c[kS];
-#pragma ss stream_name "rodinia.srad_v2.cE.ld"
+#pragma ss stream_name "rodinia.srad_v3.2.cE.ld"
         float cE = c[k + 1];
         float cW = cN;
 
-        // divergence (equ 58)
-#pragma ss stream_name "rodinia.srad_v2.deltaN.ld"
-        float dNValue = deltaN[k];
-#pragma ss stream_name "rodinia.srad_v2.deltaS.ld"
-        float dSValue = deltaS[k];
-#pragma ss stream_name "rodinia.srad_v2.deltaW.ld"
-        float dWValue = deltaW[k];
-#pragma ss stream_name "rodinia.srad_v2.deltaE.ld"
-        float dEValue = deltaE[k];
+#pragma ss stream_name "rodinia.srad_v3.2.Jc.ld"
+        float Jc = J1[k];
+#pragma ss stream_name "rodinia.srad_v3.2.Jw.ld"
+        float Jw = J1[k - 1];
+#pragma ss stream_name "rodinia.srad_v3.2.Je.ld"
+        float Je = J1[k + 1];
+#pragma ss stream_name "rodinia.srad_v3.2.Jn.ld"
+        float Jn = J1[kN];
+#pragma ss stream_name "rodinia.srad_v3.2.Js.ld"
+        float Js = J1[kS];
 
+        float dNValue = Jn - Jc;
+        float dWValue = Jw - Jc;
+        float dEValue = Je - Jc;
+        float dSValue = Js - Jc;
+
+        // divergence (equ 58)
         float D = cN * dNValue + cS * dSValue + cW * dWValue + cE * dEValue;
 
         // image update (equ 61)
@@ -376,11 +368,8 @@ int main(int argc, char *argv[]) {
         // ! GemForge
         // Fix lambda to reduce the number of input for the computation.
 
-#pragma ss stream_name "rodinia.srad_v2.Jc2.ld"
-        float Jc = J[k];
-
-#pragma ss stream_name "rodinia.srad_v2.J.st"
-        J[k] = Jc + 0.25f * D;
+#pragma ss stream_name "rodinia.srad_v3.2.J.st"
+        J2[k] = Jc + 0.25f * D;
       }
     }
 #ifdef GEM_FORGE
