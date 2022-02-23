@@ -293,6 +293,21 @@ void usage(int argc, char **argv) {
   exit(1);
 }
 
+#ifdef GEM_FORGE
+void gf_warm_array(const char *name, void *buffer, uint64_t totalBytes) {
+  uint64_t cachedBytes = m5_stream_nuca_get_cached_bytes(buffer);
+  printf("[GF_WARM] Region %s TotalBytes %lu CachedBytes %lu Cached %.2f%%.\n",
+         name, totalBytes, cachedBytes,
+         ((float)cachedBytes) / ((float)totalBytes) * 100.f);
+  assert(cachedBytes <= totalBytes);
+  for (uint64_t i = 0; i < cachedBytes; i += 64) {
+    __attribute__((unused)) volatile uint8_t data = ((uint8_t *)buffer)[i];
+  }
+  printf("[GF_WARM] Region %s Warmed %.2f%%.\n", name,
+         ((float)cachedBytes) / ((float)totalBytes) * 100.f);
+}
+#endif
+
 int main(int argc, char **argv) {
   if (argc != 10) {
     usage(argc, argv);
@@ -336,7 +351,8 @@ int main(int argc, char **argv) {
   FLOAT max_slope = MAX_PD / (FACTOR_CHIP * t_chip * SPEC_HEAT_SI);
   FLOAT dt = PRECISION / max_slope;
 
-  int size = numCols * numRows * layers;
+  int layerSize = numCols * numRows;
+  int size = layerSize * layers;
 
   omp_set_dynamic(0);
   omp_set_num_threads(numThreads);
@@ -380,13 +396,17 @@ int main(int argc, char **argv) {
   }
 
 #ifdef GEM_FORGE
-  m5_stream_nuca_region("rodinia.hotspot3D.powerIn", powerIn, sizeof(powerIn[0]), size);
-  m5_stream_nuca_region("rodinia.hotspot3D.tempIn", tempIn, sizeof(tempIn[0]), size);
-  m5_stream_nuca_region("rodinia.hotspot3D.tempOut", tempOut, sizeof(tempOut[0]), size);
-  m5_stream_nuca_align(powerIn, powerIn, numCols);
-  m5_stream_nuca_align(powerIn, powerIn, numCols * numRows);
-  m5_stream_nuca_align(tempIn, powerIn, 0);
-  m5_stream_nuca_align(tempOut, powerIn, 0);
+  // The first and last layer of Power is not used.
+  m5_stream_nuca_region("rodinia.hotspot3D.powerIn", powerIn + layerSize,
+                        sizeof(powerIn[0]), size - 2 * layerSize);
+  m5_stream_nuca_region("rodinia.hotspot3D.tempIn", tempIn, sizeof(tempIn[0]),
+                        size);
+  m5_stream_nuca_region("rodinia.hotspot3D.tempOut", tempOut,
+                        sizeof(tempOut[0]), size);
+  m5_stream_nuca_align(tempIn, tempIn, numCols);
+  m5_stream_nuca_align(tempIn, tempIn, layerSize);
+  m5_stream_nuca_align(tempOut, tempIn, 0);
+  m5_stream_nuca_align(powerIn + layerSize, tempIn, layerSize);
   m5_stream_nuca_remap();
 #endif
 
@@ -395,9 +415,12 @@ int main(int argc, char **argv) {
 #endif
 
   if (warm) {
-    /**
-     * Warm them up separately.
-     */
+#ifdef GEM_FORGE
+    gf_warm_array("powerIn", powerIn + layerSize,
+                  sizeof(powerIn[0]) * (size - 2 * layerSize));
+    gf_warm_array("tempIn", tempIn, sizeof(tempIn[0]) * size);
+    gf_warm_array("tempOut", tempOut, sizeof(tempOut[0]) * size);
+#else
 #define WARM_ARRAY(A)                                                          \
   for (int64_t i = 0; i < size; i += 64 / sizeof(FLOAT)) {                     \
     volatile FLOAT v = A[i];                                                   \
@@ -406,6 +429,7 @@ int main(int argc, char **argv) {
     WARM_ARRAY(tempIn);
     WARM_ARRAY(tempOut);
 #undef WARM_ARRAY
+#endif
   }
 
   // Start the threads.

@@ -7,6 +7,7 @@
 
 #ifdef GEM_FORGE
 #include "gem5/m5ops.h"
+#include <cassert>
 #endif
 
 // Returns the current system time in microseconds
@@ -27,7 +28,11 @@
 #define OPEN
 //#define NUM_THREAD 4
 
+#ifdef USE_FLOAT32
+typedef float FLOAT;
+#else
 typedef double FLOAT;
+#endif
 
 /* chip parameters	*/
 const FLOAT t_chip = 0.0005;
@@ -155,6 +160,24 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
 #endif
 }
 
+#ifdef GEM_FORGE
+void gf_warm_array(const char *name, void *buffer, uint64_t totalBytes) {
+  uint64_t cachedBytes = m5_stream_nuca_get_cached_bytes(buffer);
+  printf("[GF_WARM] Region %s TotalBytes %lu CachedBytes %lu Cached %.2f%%.\n",
+         name, totalBytes, cachedBytes,
+         static_cast<float>(cachedBytes) / static_cast<float>(totalBytes) *
+             100.f);
+  assert(cachedBytes <= totalBytes);
+  for (uint64_t i = 0; i < cachedBytes; i += 64) {
+    __attribute__((unused)) volatile uint8_t data =
+        reinterpret_cast<uint8_t *>(buffer)[i];
+  }
+  printf("[GF_WARM] Region %s Warmed %.2f%%.\n", name,
+         static_cast<float>(cachedBytes) / static_cast<float>(totalBytes) *
+             100.f);
+}
+#endif
+
 /* Transient solver driver routine: simply converts the heat
  * transfer differential equations to difference equations
  * and solves the difference equations by iterating
@@ -181,9 +204,11 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
   m5_detail_sim_start();
 #endif
   if (warm) {
-    /**
-     * Warm up like this to make paddr continuous.
-     */
+#ifdef GEM_FORGE
+    gf_warm_array("temp", temp, sizeof(temp[0]) * row * col);
+    gf_warm_array("result", result, sizeof(result[0]) * row * col);
+    gf_warm_array("power", power, sizeof(power[0]) * row * col);
+#else
     for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
       volatile FLOAT vr = result[i];
     }
@@ -193,6 +218,7 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
     for (uint64_t i = 0; i < row * col; i += 64 / sizeof(FLOAT)) {
       volatile FLOAT vr = power[i];
     }
+#endif
   }
   // Start the threads.
 #pragma omp parallel for schedule(static)
@@ -323,7 +349,8 @@ int main(int argc, char **argv) {
   // Stream SNUCA.
   m5_stream_nuca_region("rodinia.hotspot.temp", temp, sizeof(temp[0]), size);
   m5_stream_nuca_region("rodinia.hotspot.power", power, sizeof(power[0]), size);
-  m5_stream_nuca_region("rodinia.hotspot.result", result, sizeof(result[0]), size);
+  m5_stream_nuca_region("rodinia.hotspot.result", result, sizeof(result[0]),
+                        size);
   m5_stream_nuca_align(power, power, grid_cols);
   m5_stream_nuca_align(temp, power, 0);
   m5_stream_nuca_align(result, power, 0);

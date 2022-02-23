@@ -13,8 +13,6 @@
 #include "gem5/m5ops.h"
 #endif
 
-void run(int argc, char **argv);
-
 /* define timer macros */
 #define pin_stats_reset() startCycle()
 #define pin_stats_pause(cycles) stopCycle(cycles)
@@ -30,6 +28,46 @@ int *result;
 int *temp;
 int *Buffer;
 #define M_SEED 9
+
+#define IN_RANGE(x, min, max) ((x) >= (min) && (x) <= (max))
+#define CLAMP_RANGE(x, min, max) x = (x < (min)) ? min : ((x > (max)) ? max : x)
+#define MIN(a, b) ((a) <= (b) ? (a) : (b))
+
+__attribute__((noinline)) void pathfinder(int *src, int *dst) {
+  for (int64_t t = 0; t < rows - 1; t++) {
+    int *temp = src;
+    src = dst;
+    dst = temp;
+
+#ifdef GEM_FORGE
+    m5_work_begin(0, 0);
+#endif
+
+#pragma omp parallel for firstprivate(cols, t, src, dst, wall) schedule(static)
+    for (int64_t n = 0; n < cols - 2; n++) {
+#pragma ss stream_name "rodinia.pathfinder.src.ld"
+      int src1 = src[n];
+#pragma ss stream_name "rodinia.pathfinder.src1.ld"
+      int src2 = src[n + 1];
+#pragma ss stream_name "rodinia.pathfinder.src2.ld"
+      int src3 = src[n + 2];
+#pragma ss stream_name "rodinia.pathfinder.wall.ld"
+      int w = wall[t * cols + n];
+      int min = MIN(src1, MIN(src2, src3));
+      int v = w + min;
+#pragma ss stream_name "rodinia.pathfinder.dst.st"
+      dst[n + 1] = v;
+    }
+
+    // Expand the boundary values.
+    dst[0] = dst[1];
+    dst[cols + 1] = dst[cols];
+
+#ifdef GEM_FORGE
+    m5_work_end(0, 0);
+#endif
+  }
+}
 
 void init(int argc, char **argv) {
   if (argc == 5) {
@@ -55,6 +93,7 @@ void init(int argc, char **argv) {
   const int LLC_SIZE = 64 * 1024;
   const int CACHE_BLOCK_SIZE = 64;
   const int64_t size = rows * cols;
+  // We add 4 for the last extra element of dst[].
   int64_t totalBytes = (size + 4 * cols + 4) * sizeof(int) + OFFSET_BYTES;
   int64_t numPages = (totalBytes + PAGE_SIZE - 1) / PAGE_SIZE;
   int *idx = (int *)aligned_alloc(CACHE_BLOCK_SIZE, numPages * sizeof(int));
@@ -93,7 +132,8 @@ void init(int argc, char **argv) {
   // Stream SNUCA.
   m5_stream_nuca_region("rodinia.pathfinder.wall", wall, sizeof(wall[0]), size);
   m5_stream_nuca_region("rodinia.pathfinder.temp", temp, sizeof(temp[0]), cols);
-  m5_stream_nuca_region("rodinia.pathfinder.result", result, sizeof(result[0]), cols);
+  m5_stream_nuca_region("rodinia.pathfinder.result", result, sizeof(result[0]),
+                        cols);
   m5_stream_nuca_align(wall, wall, cols);
   m5_stream_nuca_align(temp, wall, 0);
   m5_stream_nuca_align(result, wall, 0);
@@ -123,51 +163,24 @@ void init(int argc, char **argv) {
 }
 
 void fatal(char *s) { fprintf(stderr, "error: %s\n", s); }
-#define IN_RANGE(x, min, max) ((x) >= (min) && (x) <= (max))
-#define CLAMP_RANGE(x, min, max) x = (x < (min)) ? min : ((x > (max)) ? max : x)
-#define MIN(a, b) ((a) <= (b) ? (a) : (b))
-
-int main(int argc, char **argv) {
-  run(argc, argv);
-
-  return EXIT_SUCCESS;
-}
-
-__attribute__((noinline)) void pathfinder(int *src, int *dst) {
-  for (int64_t t = 0; t < rows - 1; t++) {
-    int *temp = src;
-    src = dst;
-    dst = temp;
 
 #ifdef GEM_FORGE
-    m5_work_begin(0, 0);
-#endif
-
-#pragma omp parallel for firstprivate(cols, t, src, dst, wall) schedule(static)
-    for (int64_t n = 0; n < cols; n++) {
-#pragma ss stream_name "rodinia.pathfinder.src.ld"
-      int src1 = src[n];
-#pragma ss stream_name "rodinia.pathfinder.src1.ld"
-      int src2 = src[n + 1];
-#pragma ss stream_name "rodinia.pathfinder.src2.ld"
-      int src3 = src[n + 2];
-#pragma ss stream_name "rodinia.pathfinder.wall.ld"
-      int w = wall[t * cols + n];
-      int min = MIN(src1, MIN(src2, src3));
-      int v = w + min;
-#pragma ss stream_name "rodinia.pathfinder.dst.st"
-      dst[n + 1] = v;
-    }
-
-    // Expand the boundary values.
-    dst[0] = dst[1];
-    dst[cols + 1] = dst[cols];
-
-#ifdef GEM_FORGE
-    m5_work_end(0, 0);
-#endif
+void gf_warm_array(const char *name, void *buffer, uint64_t totalBytes) {
+  uint64_t cachedBytes = m5_stream_nuca_get_cached_bytes(buffer);
+  printf("[GF_WARM] Region %s TotalBytes %lu CachedBytes %lu Cached %.2f%%.\n",
+         name, totalBytes, cachedBytes,
+         static_cast<float>(cachedBytes) / static_cast<float>(totalBytes) *
+             100.f);
+  assert(cachedBytes <= totalBytes);
+  for (uint64_t i = 0; i < cachedBytes; i += 64) {
+    __attribute__((unused)) volatile uint8_t data =
+        reinterpret_cast<uint8_t *>(buffer)[i];
   }
+  printf("[GF_WARM] Region %s Warmed %.2f%%.\n", name,
+         static_cast<float>(cachedBytes) / static_cast<float>(totalBytes) *
+             100.f);
 }
+#endif
 
 void run(int argc, char **argv) {
   init(argc, argv);
@@ -194,6 +207,11 @@ void run(int argc, char **argv) {
 #endif
 
   if (warm) {
+#ifdef GEM_FORGE
+    gf_warm_array("temp", temp, sizeof(temp[0]) * cols);
+    gf_warm_array("result", result, sizeof(result[0]) * cols);
+    gf_warm_array("wall", wall, sizeof(wall[0]) * rows * cols);
+#else
     // Touch them to warm up.
     for (int64_t n = 0; n < rows * cols; n += (64 / sizeof(int))) {
       volatile int v = wall[n];
@@ -204,6 +222,7 @@ void run(int argc, char **argv) {
     for (int64_t n = 0; n < cols; n += (64 / sizeof(int))) {
       volatile int vd = dst[n];
     }
+#endif
   }
 
   int p;
@@ -245,4 +264,10 @@ void run(int argc, char **argv) {
   free(wall);
   free(dst);
   free(src);
+}
+
+int main(int argc, char **argv) {
+  run(argc, argv);
+
+  return EXIT_SUCCESS;
 }
