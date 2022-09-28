@@ -101,44 +101,12 @@ struct CommonOMPArgs {
 void doQuery(struct CommonOMPArgs args, int count, int *keys, record *ans) {
   kernel_query(args.nthreads, args.records, args.knodes, args.knodes_elem,
                order, maxheight, count, keys, ans);
-
-#ifdef DUMP_OUTPUT
-  const char *output = "output.txt";
-  FILE *pFile = fopen(output, "aw+");
-  if (pFile == NULL) {
-    fprintf(stderr, "Fail to open %s !\n", output);
-    exit(1);
-  }
-
-  fprintf(pFile, "\n ******command: k count=%d \n", count);
-  for (int i = 0; i < count; i++) {
-    fprintf(pFile, "%d     %d     %d\n", i, keys[i], ans[i].value);
-  }
-  fprintf(pFile, " \n");
-  fclose(pFile);
-#endif
 }
 
 void doRange(struct CommonOMPArgs args, int count, int rSize, int *start,
              int *end, int *recstart, int *reclength) {
   kernel_range(args.nthreads, args.knodes, args.knodes_elem, order, maxheight,
                count, start, end, recstart, reclength);
-
-#ifdef DUMP_OUTPUT
-  const char *output = "output.txt";
-  FILE *pFile = fopen(output, "aw+");
-  if (pFile == NULL) {
-    fprintf(stderr, "Fail to open %s !\n", output);
-    exit(1);
-  }
-  fprintf(pFile, "\n******command: j count=%d, rSize=%d \n", count, rSize);
-  for (int i = 0; i < count; i++) {
-    fprintf(pFile, "%d    %d    %d    %d\n", i, start[i], recstart[i],
-            reclength[i]);
-  }
-  fprintf(pFile, " \n");
-  fclose(pFile);
-#endif
 }
 
 int main(int argc, char **argv) {
@@ -222,11 +190,12 @@ int main(int argc, char **argv) {
 
     fclose(o);
   }
-  printf("knodes %ld.\n", knodes_elem);
+  printf("Threads %d #Knodes %ld %ldkB #Records %ld %ldkB.\n", cores_arg,
+         knodes_elem, knodes_elem * sizeof(knode) / 1024, size,
+         size * sizeof(record) / 1024);
 
   // kernel query range 10000
   int query_count = 10000;
-  printf("******command: k count=%d \n", query_count);
   if (query_count > 65535) {
     printf("ERROR: Number of requested querries should be 65,535 at most. "
            "(limited by # of CUDA blocks)\n");
@@ -268,12 +237,13 @@ int main(int argc, char **argv) {
     reclength[i] = 0;
   }
 
+  printf("Query %d Range %d RangeSize %d.\n", query_count, range_count,
+         range_rSize);
+
   omp_set_num_threads(cores_arg);
 #ifdef GEM_FORGE
   // mallopt(M_ARENA_MAX, GEM_FORGE_MALLOC_ARENA_MAX);
 #endif
-
-  printf("nthreads = %d.\n", cores_arg);
 
 #ifdef GEM_FORGE
   m5_detail_sim_start();

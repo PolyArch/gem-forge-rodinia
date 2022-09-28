@@ -32,62 +32,80 @@ void kernel_range(int cores_arg, knode *knodes, long knodes_elem, int order,
     knode *lhsKnode = &knodes[0];
     knode *rhsKnode = &knodes[0];
 
-    {
-      // Peel down the iteration for the root node.
-      int nextLHSKnodeId = -1;
-      int nextRHSKnodeId = -1;
-      for (uint64_t thid = 0; thid < order; thid++) {
+    // {
+    //   // Peel down the iteration for the root node.
+    //   int nextLHSKnodeId = -1;
+    //   int nextRHSKnodeId = -1;
+    //   for (uint64_t thid = 0; thid < order; thid++) {
 
-        int lhsKey1 = lhsKnode->keys[thid];
-        int lhsKey2 = lhsKnode->keys[thid + 1];
-        if (lhsKey1 <= targetStart && lhsKey2 > targetStart) {
-          nextLHSKnodeId = thid;
-        }
-        if (lhsKey1 <= targetEnd && lhsKey2 > targetEnd) {
-          nextRHSKnodeId = thid;
-        }
-      }
+    //     int lhsKey1 = lhsKnode->keys[thid];
+    //     int lhsKey2 = lhsKnode->keys[thid + 1];
+    //     if (lhsKey1 <= targetStart && lhsKey2 > targetStart) {
+    //       nextLHSKnodeId = thid;
+    //     }
+    //     if (lhsKey1 <= targetEnd && lhsKey2 > targetEnd) {
+    //       nextRHSKnodeId = thid;
+    //     }
+    //   }
 
-      lhsKnode = &knodes[lhsKnode->indices[nextLHSKnodeId]];
-      rhsKnode = &knodes[rhsKnode->indices[nextRHSKnodeId]];
-    }
+    //   lhsKnode = &knodes[lhsKnode->indices[nextLHSKnodeId]];
+    //   rhsKnode = &knodes[rhsKnode->indices[nextRHSKnodeId]];
+    // }
 
     // process remaining levels of the tree
-    for (uint64_t i = 1; i < maxheight; i++) {
+    for (uint64_t i = 0; i < maxheight; i++) {
       // process all leaves at each level
-      int nextLHSKnodeId = -1;
-      int nextRHSKnodeId = -1;
-      for (uint64_t thid = 0; thid < order; thid++) {
+      {
+        int64_t nodeId = 0;
+        while (true) {
+          int *key = lhsKnode->keys + nodeId;
+#pragma ss stream_name "rodinia.b+tree.range.lhsKey1.ld"
+          int lhsKey = key[0];
+#pragma ss stream_name "rodinia.b+tree.range.rhsKey1.ld"
+          int rhsKey = key[1];
 
-        int lhsKey1 = lhsKnode->keys[thid];
-        int lhsKey2 = lhsKnode->keys[thid + 1];
-        if (lhsKey1 <= targetStart && lhsKey2 > targetStart) {
-          nextLHSKnodeId = thid;
+          int matched = lhsKey <= targetStart && rhsKey > targetStart;
+          if (matched) {
+            break;
+          }
+          nodeId++;
         }
-        int rhsKey1 = rhsKnode->keys[thid];
-        int rhsKey2 = rhsKnode->keys[thid + 1];
-        if (rhsKey1 <= targetEnd && rhsKey2 > targetEnd) {
-          nextRHSKnodeId = thid;
-        }
+#pragma ss stream_name "rodinia.b+tree.query.indice.ld"
+        int nextIndice = lhsKnode->indices[nodeId];
+        lhsKnode = &knodes[nextIndice];
       }
 
-      lhsKnode = &knodes[lhsKnode->indices[nextLHSKnodeId]];
-      rhsKnode = &knodes[rhsKnode->indices[nextRHSKnodeId]];
-    }
-     
-    
+      {
+        int64_t nodeId = 0;
+        while (true) {
+          int *key = rhsKnode->keys + nodeId;
+#pragma ss stream_name "rodinia.b+tree.range.lhsKey2.ld"
+          int lhsKey = key[0];
+#pragma ss stream_name "rodinia.b+tree.range.rhsKey2.ld"
+          int rhsKey = key[1];
 
+          int matched = lhsKey <= targetEnd && rhsKey > targetEnd;
+          if (matched) {
+            break;
+          }
+          nodeId++;
+        }
+#pragma ss stream_name "rodinia.b+tree.query.indice.ld"
+        int nextIndice = rhsKnode->indices[nodeId];
+        rhsKnode = &knodes[nextIndice];
+      }
+    }
 
     // process leaves
     uint64_t startRecId = UINT64_MAX;
     uint64_t endRecId = UINT64_MAX;
-    for (uint64_t thid = 0; thid < order; thid++) {
+    for (uint64_t i = 0; i < order; i++) {
       // Find the index of the starting record
-      if (lhsKnode->keys[thid] == targetStart) {
-        startRecId = thid;
+      if (lhsKnode->keys[i] == targetStart) {
+        startRecId = i;
       }
-      if (rhsKnode->keys[thid] == targetEnd) {
-        endRecId = thid;
+      if (rhsKnode->keys[i] == targetEnd) {
+        endRecId = i;
       }
     }
 
