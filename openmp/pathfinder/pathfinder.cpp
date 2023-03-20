@@ -130,10 +130,12 @@ void init(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   // Stream SNUCA.
-  m5_stream_nuca_region("rodinia.pathfinder.wall", wall, sizeof(wall[0]), size);
-  m5_stream_nuca_region("rodinia.pathfinder.temp", temp, sizeof(temp[0]), cols);
+  m5_stream_nuca_region("rodinia.pathfinder.wall", wall, sizeof(wall[0]), size,
+                        0, 0);
+  m5_stream_nuca_region("rodinia.pathfinder.temp", temp, sizeof(temp[0]), cols,
+                        0, 0);
   m5_stream_nuca_region("rodinia.pathfinder.result", result, sizeof(result[0]),
-                        cols);
+                        cols, 0, 0);
   m5_stream_nuca_align(wall, wall, cols);
   m5_stream_nuca_align(temp, wall, 0);
   m5_stream_nuca_align(result, wall, 0);

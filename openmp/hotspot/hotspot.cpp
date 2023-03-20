@@ -347,10 +347,12 @@ int main(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   // Stream SNUCA.
-  m5_stream_nuca_region("rodinia.hotspot.temp", temp, sizeof(temp[0]), size);
-  m5_stream_nuca_region("rodinia.hotspot.power", power, sizeof(power[0]), size);
+  m5_stream_nuca_region("rodinia.hotspot.temp", temp, sizeof(temp[0]),
+                        grid_cols, grid_rows, 0);
+  m5_stream_nuca_region("rodinia.hotspot.power", power, sizeof(power[0]),
+                        grid_cols, grid_rows, 0);
   m5_stream_nuca_region("rodinia.hotspot.result", result, sizeof(result[0]),
-                        size);
+                        grid_cols, grid_rows, 0);
   m5_stream_nuca_align(power, power, grid_cols);
   m5_stream_nuca_align(temp, power, 0);
   m5_stream_nuca_align(result, power, 0);

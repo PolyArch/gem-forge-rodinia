@@ -398,11 +398,11 @@ int main(int argc, char **argv) {
 #ifdef GEM_FORGE
   // The first and last layer of Power is not used.
   m5_stream_nuca_region("rodinia.hotspot3D.powerIn", powerIn + layerSize,
-                        sizeof(powerIn[0]), size - 2 * layerSize);
+                        sizeof(powerIn[0]), size - 2 * layerSize, 0, 0);
   m5_stream_nuca_region("rodinia.hotspot3D.tempIn", tempIn, sizeof(tempIn[0]),
-                        size);
+                        size, 0, 0);
   m5_stream_nuca_region("rodinia.hotspot3D.tempOut", tempOut,
-                        sizeof(tempOut[0]), size);
+                        sizeof(tempOut[0]), size, 0, 0);
   m5_stream_nuca_align(tempIn, tempIn, numCols);
   m5_stream_nuca_align(tempIn, tempIn, layerSize);
   m5_stream_nuca_align(tempOut, tempIn, 0);
