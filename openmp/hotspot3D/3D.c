@@ -116,7 +116,7 @@ FLOAT accuracy(FLOAT *arr1, FLOAT *arr2, int len) {
   return (FLOAT)sqrt(err / len);
 }
 
-void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
+void computeTempOMP(int threads, FLOAT *restrict pIn, FLOAT *restrict tIn,
                     FLOAT *restrict tOut, uint64_t nx, uint64_t ny, uint64_t nz,
                     FLOAT Cap, FLOAT Rx, FLOAT Ry, FLOAT Rz, FLOAT dt,
                     int numiter) {
@@ -145,80 +145,103 @@ void computeTempOMP(FLOAT *restrict pIn, FLOAT *restrict tIn,
 #if defined(FIX_COL)
 #define COL_SIZE FIX_COL
 
-    uint64_t matSize = ny * COL_SIZE;
+#pragma omp parallel firstprivate(tIn_t, pIn, tOut_t, threads)
+    {
+
+      uint64_t matSize = ny * COL_SIZE;
 
 #ifdef FUSE_OUTER_LOOPS
-    uint64_t startRow = ny;
-    uint64_t endRow = (nz - 1) * ny;
+      uint64_t startRow = ny;
+      uint64_t endRow = (nz - 1) * ny;
+
+#ifdef SKEW_ROW
+
+      // Rows are always interleaved by 1.
+      int64_t rows_per_round = threads;
+      int64_t total_rows = endRow - startRow;
+      int64_t row_rounds = (total_rows + rows_per_round - 1) / rows_per_round;
+
+      int tid = omp_get_thread_num();
+
+#pragma clang loop unroll(disable) vectorize(disable)
+      for (int64_t rr = 0; rr < row_rounds; ++rr) {
+
+        int64_t row = startRow + rr * rows_per_round + tid;
+
+#else
 
 #ifdef GEM_FORGE_DYN_SCHEDULE
-#pragma omp parallel for schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)             \
-    firstprivate(tIn_t, pIn, tOut_t, matSize)
+#pragma omp for schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)
 #else
-#pragma omp parallel for schedule(static)                                      \
-    firstprivate(tIn_t, pIn, tOut_t, matSize)
+#pragma omp for schedule(static)
 #endif // GEM_FORGE_DYN_SCHEDULE
-    for (uint64_t row = startRow; row < endRow; ++row) {
-#pragma omp simd
-      for (uint64_t x = 0; x < COL_SIZE; x++) {
-        uint64_t c = x + row * COL_SIZE;
-#else
-#pragma omp parallel for schedule(static)                                      \
-    firstprivate(nz, tIn_t, pIn, tOut_t, matSize)
-    for (uint64_t z = 1; z < nz - 1; z++) {
-      for (uint64_t y = 0; y < ny; y++) {
+      for (uint64_t row = startRow; row < endRow; ++row) {
+
+#endif // SKEW_ROW
+
 #pragma omp simd
         for (uint64_t x = 0; x < COL_SIZE; x++) {
-          uint64_t c = x + y * COL_SIZE + z * matSize;
+          uint64_t c = x + row * COL_SIZE;
+
+#else
+
+#pragma omp for schedule(static)
+      for (uint64_t z = 1; z < nz - 1; z++) {
+        for (uint64_t y = 0; y < ny; y++) {
+#pragma omp simd
+          for (uint64_t x = 0; x < COL_SIZE; x++) {
+            uint64_t c = x + y * COL_SIZE + z * matSize;
 #endif // FUSE_OUTER_LOOPS
 
-        uint64_t idxT = c - matSize;
-        uint64_t idxB = c + matSize;
-        uint64_t idxN = c - COL_SIZE;
-        uint64_t idxS = c + COL_SIZE;
-        // Use fixed immediate.
-        FLOAT localCC = 0.5;
-        FLOAT localCE = 0.6;
-        FLOAT localCW = 0.2;
-        FLOAT localCN = 0.3;
-        FLOAT localCS = 0.4;
-        FLOAT localCT = 0.8;
-        FLOAT localCB = 0.7;
-        FLOAT localdt = 0.1;
-        FLOAT localCap = 0.8;
-        FLOAT localAmb = 0.7;
-        uint64_t idxW = c - 1;
-        uint64_t idxE = c + 1;
+          uint64_t idxT = c - matSize;
+          uint64_t idxB = c + matSize;
+          uint64_t idxN = c - COL_SIZE;
+          uint64_t idxS = c + COL_SIZE;
+          // Use fixed immediate.
+          FLOAT localCC = 0.5;
+          FLOAT localCE = 0.6;
+          FLOAT localCW = 0.2;
+          FLOAT localCN = 0.3;
+          FLOAT localCS = 0.4;
+          FLOAT localCT = 0.8;
+          FLOAT localCB = 0.7;
+          FLOAT localdt = 0.1;
+          FLOAT localCap = 0.8;
+          FLOAT localAmb = 0.7;
+          uint64_t idxW = c - 1;
+          uint64_t idxE = c + 1;
 #pragma ss stream_name "rodinia.hotspot3D.power.ld"
-        FLOAT p = pIn[c];
+          FLOAT p = pIn[c];
 #pragma ss stream_name "rodinia.hotspot3D.tc.ld"
-        FLOAT tc = tIn_t[c];
+          FLOAT tc = tIn_t[c];
 #pragma ss stream_name "rodinia.hotspot3D.tw.ld"
-        FLOAT tw = tIn_t[idxW];
+          FLOAT tw = tIn_t[idxW];
 #pragma ss stream_name "rodinia.hotspot3D.te.ld"
-        FLOAT te = tIn_t[idxE];
+          FLOAT te = tIn_t[idxE];
 #pragma ss stream_name "rodinia.hotspot3D.tn.ld"
-        FLOAT tn = tIn_t[idxN];
+          FLOAT tn = tIn_t[idxN];
 #pragma ss stream_name "rodinia.hotspot3D.ts.ld"
-        FLOAT ts = tIn_t[idxS];
+          FLOAT ts = tIn_t[idxS];
 #pragma ss stream_name "rodinia.hotspot3D.tb.ld"
-        FLOAT tb = tIn_t[idxB];
+          FLOAT tb = tIn_t[idxB];
 #pragma ss stream_name "rodinia.hotspot3D.tt.ld"
-        FLOAT tt = tIn_t[idxT];
+          FLOAT tt = tIn_t[idxT];
 #pragma ss stream_name "rodinia.hotspot3D.out.st"
-        tOut_t[c] = localCC * tc + localCW * tw + localCE * te + localCS * ts +
-                    localCN * tn + localCB * tb + localCT * tt +
-                    (localdt / localCap) * p + localCT * localAmb;
+          tOut_t[c] = localCC * tc + localCW * tw + localCE * te +
+                      localCS * ts + localCN * tn + localCB * tb +
+                      localCT * tt + (localdt / localCap) * p +
+                      localCT * localAmb;
+        }
       }
-    }
 #ifndef FUSE_OUTER_LOOPS
-  }
+    }
 #endif
+  }
 
 #else
 #pragma omp parallel for schedule(static)                                      \
     firstprivate(tIn_t, pIn, tOut_t, ce, cw, cn, cs, ct, cb, cc, nx, ny, nz,   \
-                 amb_temp, dt, Cap)
+                     amb_temp, dt, Cap)
     for (uint64_t z = 1; z < nz - 1; z++) {
       for (uint64_t y = 0; y < ny; y++) {
 #pragma omp simd
@@ -397,8 +420,8 @@ int main(int argc, char **argv) {
 
 #ifdef GEM_FORGE
   // The first and last layer of Power is not used.
-  m5_stream_nuca_region("rodinia.hotspot3D.powerIn", powerIn + layerSize,
-                        sizeof(powerIn[0]), size - 2 * layerSize, 0, 0);
+  m5_stream_nuca_region("rodinia.hotspot3D.powerIn", powerIn,
+                        sizeof(powerIn[0]), size, 0, 0);
   m5_stream_nuca_region("rodinia.hotspot3D.tempIn", tempIn, sizeof(tempIn[0]),
                         size, 0, 0);
   m5_stream_nuca_region("rodinia.hotspot3D.tempOut", tempOut,
@@ -406,7 +429,7 @@ int main(int argc, char **argv) {
   m5_stream_nuca_align(tempIn, tempIn, numCols);
   m5_stream_nuca_align(tempIn, tempIn, layerSize);
   m5_stream_nuca_align(tempOut, tempIn, 0);
-  m5_stream_nuca_align(powerIn + layerSize, tempIn, layerSize);
+  m5_stream_nuca_align(powerIn, tempIn, 0);
   m5_stream_nuca_remap();
 #endif
 
@@ -416,8 +439,7 @@ int main(int argc, char **argv) {
 
   if (warm) {
 #ifdef GEM_FORGE
-    gf_warm_array("powerIn", powerIn + layerSize,
-                  sizeof(powerIn[0]) * (size - 2 * layerSize));
+    gf_warm_array("powerIn", powerIn, sizeof(powerIn[0]) * size);
     gf_warm_array("tempIn", tempIn, sizeof(tempIn[0]) * size);
     gf_warm_array("tempOut", tempOut, sizeof(tempOut[0]) * size);
 #else
@@ -442,8 +464,8 @@ int main(int argc, char **argv) {
   m5_reset_stats(0, 0);
 #endif
 
-  computeTempOMP(powerIn, tempIn, tempOut, numCols, numRows, layers, Cap, Rx,
-                 Ry, Rz, dt, iterations);
+  computeTempOMP(numThreads, powerIn, tempIn, tempOut, numCols, numRows, layers,
+                 Cap, Rx, Ry, Rz, dt, iterations);
 #ifdef GEM_FORGE
   m5_detail_sim_end();
   exit(0);

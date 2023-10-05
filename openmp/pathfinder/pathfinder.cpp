@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include <immintrin.h>
+
 #include <omp.h>
 
 #include "timer.h"
@@ -33,7 +35,7 @@ int *Buffer;
 #define CLAMP_RANGE(x, min, max) x = (x < (min)) ? min : ((x > (max)) ? max : x)
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
 
-__attribute__((noinline)) void pathfinder(int *src, int *dst) {
+__attribute__((noinline)) void pathfinder(int *src, int *dst, int threads) {
   for (int64_t t = 0; t < rows - 1; t++) {
     int *temp = src;
     src = dst;
@@ -43,8 +45,45 @@ __attribute__((noinline)) void pathfinder(int *src, int *dst) {
     m5_work_begin(0, 0);
 #endif
 
+#ifdef SKEW_THREAD
+
+    const int64_t one_round = threads * SKEW_THREAD;
+    const int64_t rounds = cols / one_round;
+
+#pragma omp parallel for firstprivate(cols, t, src, dst, wall, one_round,      \
+                                          rounds) schedule(static)
+    for (int64_t tid = 0; tid < threads; ++tid) {
+
+#pragma clang loop unroll(disable) vectorize(disable)
+      for (int64_t i = 0; i < rounds; ++i) {
+
+#pragma clang loop unroll(disable) vectorize(disable)
+        for (int64_t j = 0; j < SKEW_THREAD / 16; ++j) {
+
+          int64_t n = i * one_round + tid * SKEW_THREAD + j * 16;
+
+#pragma ss stream_name "rodinia.pathfinder.src.ld"
+          __m512i src1 = _mm512_load_epi32(src + n);
+#pragma ss stream_name "rodinia.pathfinder.src1.ld"
+          __m512i src2 = _mm512_load_epi32(src + n + 1);
+#pragma ss stream_name "rodinia.pathfinder.src2.ld"
+          __m512i src3 = _mm512_load_epi32(src + n + 2);
+#pragma ss stream_name "rodinia.pathfinder.wall.ld"
+          __m512i w = _mm512_load_epi32(wall + t * cols + n);
+
+          __m512i min = _mm512_min_epi32(src1, _mm512_min_epi32(src2, src3));
+          __m512i v = _mm512_add_epi32(w, min);
+#pragma ss stream_name "rodinia.pathfinder.dst.st"
+          _mm512_store_epi32(dst + n + 1, v);
+
+        }
+      }
+    }
+
+#else
 #pragma omp parallel for firstprivate(cols, t, src, dst, wall) schedule(static)
     for (int64_t n = 0; n < cols - 2; n++) {
+
 #pragma ss stream_name "rodinia.pathfinder.src.ld"
       int src1 = src[n];
 #pragma ss stream_name "rodinia.pathfinder.src1.ld"
@@ -58,6 +97,7 @@ __attribute__((noinline)) void pathfinder(int *src, int *dst) {
 #pragma ss stream_name "rodinia.pathfinder.dst.st"
       dst[n + 1] = v;
     }
+#endif
 
     // Expand the boundary values.
     dst[0] = dst[1];
@@ -238,7 +278,7 @@ void run(int argc, char **argv) {
   m5_reset_stats(0, 0);
 #endif
 
-  pathfinder(src, dst);
+  pathfinder(src, dst, num_threads);
 #ifdef GEM_FORGE
   m5_detail_sim_end();
   exit(0);

@@ -52,7 +52,7 @@ using namespace std;
 /* higher ITER also scales the running time almost linearly */
 #define ITER 3 // iterate ITER* k log k times; ITER >= 1
 
-//#define PRINTINFO //comment this out to disable output
+// #define PRINTINFO //comment this out to disable output
 #ifndef GEM_FORGE
 #define PROFILE // comment this out to disable instrumentation code
 #endif
@@ -81,7 +81,7 @@ static bool *switch_membership; // whether to switch membership in pgain
 static bool *is_center;         // whether a point is a center
 static int *center_table;       // index table of centers
 
-static int nproc; //# of threads
+static int nproc; // # of threads
 
 // instrumentation code
 #ifdef PROFILE
@@ -501,7 +501,12 @@ __attribute__((noinline)) double pgain_dist(const PGainDistArgs &args) {
       // note we've already accounted for the fact that the median
       // would save z by closing; now we have to subtract from the savings
       // the extra cost of reassigning that median and its members
-      lower[center_table[assign]] += current_cost - x_cost;
+#pragma ss stream_name "rodinia.scluster.pgain_dist.center.ld/no-float"
+      int center = center_table[assign];
+#pragma ss stream_name "whatever/no-stream"
+      double lower_cost = lower[center];
+#pragma ss stream_name "whatever/no-stream"
+      lower[center] = lower_cost + current_cost - x_cost;
     }
   }
   return cost_of_opening_x;
@@ -583,11 +588,15 @@ __attribute__((noinline)) void pgain_assign(const PGainAssignArgs &args) {
 #else
     auto distance = compute_dist(p1, p2, dim);
 #endif
-    bool close_center = gl_lower[center_table[assign]] > 0;
+#pragma ss stream_name "whatever/no-stream"
+    int center = center_table[assign];
+    bool close_center = gl_lower[center] > 0;
     if (switch_membership[i] || close_center) {
       // Either i's median (which may be i itself) is closing,
       // or i is closer to x than to its current median
+#pragma ss stream_name "whatever/no-stream"
       points->p[i].cost = weight * distance;
+#pragma ss stream_name "whatever/no-stream"
       points->p[i].assign = x;
     }
   }
@@ -1467,7 +1476,7 @@ void streamCluster(PStream *stream, long kmin, long kmax, int dim,
   centers.num = 0;
   centers.pos = centerBlock;
   centers.index = (int32_t *)aligned_alloc(HW_CACHE_LINE_BYTES,
-                                          centersize * sizeof(int32_t));
+                                           centersize * sizeof(int32_t));
 
 #ifdef GEM_FORGE
 // We only have partial support on this.

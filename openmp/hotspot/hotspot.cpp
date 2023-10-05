@@ -26,7 +26,7 @@
 /* capacitance fitting factor	*/
 #define FACTOR_CHIP 0.5
 #define OPEN
-//#define NUM_THREAD 4
+// #define NUM_THREAD 4
 
 #ifdef USE_FLOAT32
 typedef float FLOAT;
@@ -48,9 +48,10 @@ int num_omp_threads;
  * advances the solution of the discretized difference equations
  * by one time step
  */
-void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
-                      FLOAT *__restrict__ power, int row, int col, FLOAT Cap_1,
-                      FLOAT Rx_1, FLOAT Ry_1, FLOAT Rz_1, FLOAT step) {
+void single_iteration(int threads, FLOAT *__restrict__ result,
+                      FLOAT *__restrict__ temp, FLOAT *__restrict__ power,
+                      int row, int col, FLOAT Cap_1, FLOAT Rx_1, FLOAT Ry_1,
+                      FLOAT Rz_1, FLOAT step) {
 #ifdef BLOCKED
   uint64_t num_chunk = row * col / (BLOCK_SIZE_R * BLOCK_SIZE_C);
   uint64_t chunks_in_row = col / BLOCK_SIZE_C;
@@ -61,60 +62,92 @@ void single_iteration(FLOAT *__restrict__ result, FLOAT *__restrict__ temp,
   m5_work_begin(0, 0);
 #endif
 #ifndef BLOCKED
-#pragma omp parallel for shared(power, temp, result)                           \
-    firstprivate(row, col, Cap_1, Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
-  for (uint64_t r = 1; r < row - 1; ++r) {
-    /**
-     * ! This will access one element outside the array, but I keep it so that
-     * ! the inner-most loop is perfectly vectorizable.
-     */
+
+#pragma omp parallel firstprivate(threads, result, temp, power, row, col,      \
+                                      Cap_1, Rx_1, Ry_1, Rz_1, amb_temp)
+  {
+
+#ifdef SKEW_ROW
+
+    // Rows are always interleaved by 1.
+    int64_t rows_per_round = threads;
+    int64_t row_rounds = (row + rows_per_round - 1) / rows_per_round;
+    int64_t row_remainder = row % rows_per_round;
+    if (row_remainder != 0) {
+      exit(1);
+    }
+
+    int tid = omp_get_thread_num();
+
+    // Skip the first row.
+    int64_t rr_start = tid == 0 ? 1 : 0;
+    // Skip the last row.
+    int64_t rr_end = (tid == threads - 1) ? row_rounds - 1 : row_rounds;
+
+#pragma clang loop unroll(disable) vectorize(disable)
+    for (int64_t rr = rr_start; rr < rr_end; ++rr) {
+
+      int64_t r = rr * rows_per_round + tid;
+
+#else
+
+#pragma omp for schedule(static)
+    for (uint64_t r = 1; r < row - 1; ++r) {
+#endif
+
+      /**
+       * ! This will access one element outside the array, but I keep it so
+       * ! that the inner-most loop is perfectly vectorizable.
+       */
+
 #pragma omp simd
 #ifdef GEM_FORGE_FIX_INPUT
-    for (uint64_t c = 0; c < GEM_FORGE_FIX_INPUT_SIZE; ++c) {
-      uint64_t idx = r * GEM_FORGE_FIX_INPUT_SIZE + c;
-      uint64_t idxS = idx + GEM_FORGE_FIX_INPUT_SIZE;
-      uint64_t idxN = idx - GEM_FORGE_FIX_INPUT_SIZE;
-      // Just use some constant number to avoid too many inputs for stream
-      // computation.
-      FLOAT Cap = 0.5;
-      FLOAT Rx = 1.5;
-      FLOAT Ry = 1.2;
-      FLOAT Rz = 0.7;
+      for (uint64_t c = 0; c < GEM_FORGE_FIX_INPUT_SIZE; ++c) {
+        uint64_t idx = r * GEM_FORGE_FIX_INPUT_SIZE + c;
+        uint64_t idxS = idx + GEM_FORGE_FIX_INPUT_SIZE;
+        uint64_t idxN = idx - GEM_FORGE_FIX_INPUT_SIZE;
+        // Just use some constant number to avoid too many inputs for stream
+        // computation.
+        FLOAT Cap = 0.5;
+        FLOAT Rx = 1.5;
+        FLOAT Ry = 1.2;
+        FLOAT Rz = 0.7;
 #else
-    for (uint64_t c = 0; c < col; ++c) {
-      uint64_t idx = r * col + c;
-      uint64_t idxS = idx + col;
-      uint64_t idxN = idx - col;
-      FLOAT Cap = Cap_1;
-      FLOAT Rx = Rx_1;
-      FLOAT Ry = Ry_1;
-      FLOAT Rz = Rz_1;
+      for (uint64_t c = 0; c < col; ++c) {
+        uint64_t idx = r * col + c;
+        uint64_t idxS = idx + col;
+        uint64_t idxN = idx - col;
+        FLOAT Cap = Cap_1;
+        FLOAT Rx = Rx_1;
+        FLOAT Ry = Ry_1;
+        FLOAT Rz = Rz_1;
 #endif
-      uint64_t idxE = idx + 1;
-      uint64_t idxW = idx - 1;
+        uint64_t idxE = idx + 1;
+        uint64_t idxW = idx - 1;
 #pragma ss stream_name "rodinia.hotspot.power.ld"
-      FLOAT powerC = power[idx];
+        FLOAT powerC = power[idx];
 #pragma ss stream_name "rodinia.hotspot.tempC.ld"
-      FLOAT tempC = temp[idx];
+        FLOAT tempC = temp[idx];
 #pragma ss stream_name "rodinia.hotspot.tempS.ld"
-      FLOAT tempS = temp[idxS];
+        FLOAT tempS = temp[idxS];
 #pragma ss stream_name "rodinia.hotspot.tempN.ld"
-      FLOAT tempN = temp[idxN];
+        FLOAT tempN = temp[idxN];
 #pragma ss stream_name "rodinia.hotspot.tempE.ld"
-      FLOAT tempE = temp[idxE];
+        FLOAT tempE = temp[idxE];
 #pragma ss stream_name "rodinia.hotspot.tempW.ld"
-      FLOAT tempW = temp[idxW];
-      FLOAT delta =
-          Cap * (powerC + (tempS + tempN - 2.f * tempC) * Ry +
-                 (tempE + tempW - 2.f * tempC) * Rx + (amb_temp - tempC) * Rz);
+        FLOAT tempW = temp[idxW];
+        FLOAT delta = Cap * (powerC + (tempS + tempN - 2.f * tempC) * Ry +
+                             (tempE + tempW - 2.f * tempC) * Rx +
+                             (amb_temp - tempC) * Rz);
 #pragma ss stream_name "rodinia.hotspot.result.st"
-      result[idx] = tempC + delta;
+        result[idx] = tempC + delta;
+      }
     }
   }
 #else
 #pragma omp parallel for shared(power, temp, result)                           \
     firstprivate(row, col, num_chunk, chunks_in_row, chunks_in_col, Cap_1,     \
-                 Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
+                     Rx_1, Ry_1, Rz_1, amb_temp) schedule(static)
   for (uint64_t chunk = 0; chunk < num_chunk; ++chunk) {
     uint64_t r_start = BLOCK_SIZE_R * (chunk / chunks_in_col);
     uint64_t c_start = BLOCK_SIZE_C * (chunk % chunks_in_row);
@@ -232,7 +265,8 @@ void compute_tran_temp(FLOAT *result, int num_iterations, FLOAT *temp,
   FLOAT *r = result;
   FLOAT *t = temp;
   for (int i = 0; i < num_iterations; i++) {
-    single_iteration(r, t, power, row, col, Cap_1, Rx_1, Ry_1, Rz_1, step);
+    single_iteration(num_omp_threads, r, t, power, row, col, Cap_1, Rx_1, Ry_1,
+                     Rz_1, step);
     FLOAT *tmp = t;
     t = r;
     r = tmp;

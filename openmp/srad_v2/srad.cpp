@@ -1,7 +1,7 @@
 // srad.cpp : Defines the entry point for the console application.
 //
 
-//#define OUTPUT
+// #define OUTPUT
 
 #include <cassert>
 #include <malloc.h>
@@ -235,85 +235,115 @@ int main(int argc, char *argv[]) {
     m5_work_begin(0, 0);
 #endif
 
-#pragma omp parallel for firstprivate(rows, cols, q0sqr) schedule(static)
-    for (uint64_t i = 1; i < rows - 1; i++) {
-#pragma clang loop vectorize(assume_safety)
-#ifdef GEM_FORGE_FIX_INPUT
-      for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
-        uint64_t k = i * GEM_FORGE_FIX_COLS + j;
-        uint64_t kN = k - GEM_FORGE_FIX_COLS;
-        uint64_t kS = k + GEM_FORGE_FIX_COLS;
+#pragma omp parallel firstprivate(rows, cols, q0sqr)
+    {
+
+#ifdef SKEW_ROW
+      // Rows are always interleaved by 1.
+      int64_t rows_per_round = nthreads;
+      int64_t row_rounds = (rows + rows_per_round - 1) / rows_per_round;
+      int64_t row_remainder = rows % rows_per_round;
+      if (row_remainder != 0) {
+        exit(1);
+      }
+
+      int tid = omp_get_thread_num();
+
+      // Skip the first row.
+      int64_t rr_start = tid == 0 ? 1 : 0;
+      // Skip the last row.
+      int64_t rr_end = (tid == nthreads - 1) ? row_rounds - 1 : row_rounds;
+
+#pragma clang loop unroll(disable) vectorize(disable)
+      for (int64_t rr = rr_start; rr < rr_end; ++rr) {
+
+        int64_t i = rr * rows_per_round + tid;
+
 #else
-      for (uint64_t j = 0; j < cols; j++) {
-        uint64_t k = i * cols + j;
-        uint64_t kN = k - cols;
-        uint64_t kS = k + cols;
+#pragma omp for schedule(static)
+      for (uint64_t i = 1; i < rows - 1; i++) {
+
 #endif
 
-        /**
-         * ! Avoid i+1.
-         * Please avoid have the expression i + 1 in the loop body,
-         * as it will break our stream pass to analyze the pattern
-         * of i.
-         */
+#pragma clang loop vectorize(assume_safety)
+#ifdef GEM_FORGE_FIX_INPUT
+        for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
+          uint64_t k = i * GEM_FORGE_FIX_COLS + j;
+          uint64_t kN = k - GEM_FORGE_FIX_COLS;
+          uint64_t kS = k + GEM_FORGE_FIX_COLS;
+#else
+        for (uint64_t j = 0; j < cols; j++) {
+          uint64_t k = i * cols + j;
+          uint64_t kN = k - cols;
+          uint64_t kS = k + cols;
+#endif
 
-        /**
-         * ! Accessing j - 1 and j + 1.
-         * This will access out of array bound, but keeps the loop trip count
-         * a multiple of vectorize width.
-         * We cound also do this with padding.
-         */
+          /**
+           * ! Avoid i+1.
+           * Please avoid have the expression i + 1 in the loop body,
+           * as it will break our stream pass to analyze the pattern
+           * of i.
+           */
 
-        // directional derivates
+          /**
+           * ! Accessing j - 1 and j + 1.
+           * This will access out of array bound, but keeps the loop trip count
+           * a multiple of vectorize width.
+           * We cound also do this with padding.
+           */
+
+          // directional derivates
 
 #pragma ss stream_name "rodinia.srad_v2.Jc.ld"
-        float Jc = J[k];
+          float Jc = J[k];
 #pragma ss stream_name "rodinia.srad_v2.Jw.ld"
-        float Jw = J[k - 1];
+          float Jw = J[k - 1];
 #pragma ss stream_name "rodinia.srad_v2.Je.ld"
-        float Je = J[k + 1];
+          float Je = J[k + 1];
 #pragma ss stream_name "rodinia.srad_v2.Jn.ld"
-        float Jn = J[kN];
+          float Jn = J[kN];
 #pragma ss stream_name "rodinia.srad_v2.Js.ld"
-        float Js = J[kS];
+          float Js = J[kS];
 
-        float dWValue = Jw - Jc;
-        float dEValue = Je - Jc;
-        float dNValue = Jn - Jc;
-        float dSValue = Js - Jc;
+          float dWValue = Jw - Jc;
+          float dEValue = Je - Jc;
+          float dNValue = Jn - Jc;
+          float dSValue = Js - Jc;
 
-        float G2 = (dNValue * dNValue + dSValue * dSValue + dWValue * dWValue +
-                    dEValue * dEValue) /
-                   (Jc * Jc);
+          float G2 = (dNValue * dNValue + dSValue * dSValue +
+                      dWValue * dWValue + dEValue * dEValue) /
+                     (Jc * Jc);
 
-        float L = (dNValue + dSValue + dWValue + dEValue) / Jc;
+          float L = (dNValue + dSValue + dWValue + dEValue) / Jc;
 
-        float num = (0.5f * G2) - ((1.0f / 16.0f) * (L * L));
-        float den = 1.0f + (.25f * L);
-        float qsqr = num / (den * den);
+          float num = (0.5f * G2) - ((1.0f / 16.0f) * (L * L));
+          float den = 1.0f + (.25f * L);
+          float qsqr = num / (den * den);
 
-        // diffusion coefficent (equ 33)
-        den = (qsqr - q0sqr) / (q0sqr * (1.0f + q0sqr));
-        float cValue = 1.0f / (1.0f + den);
-        // saturate diffusion coefficent
-        // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f : cValue);
+          // diffusion coefficent (equ 33)
+          den = (qsqr - q0sqr) / (q0sqr * (1.0f + q0sqr));
+          float cValue = 1.0f / (1.0f + den);
+          // saturate diffusion coefficent
+          // cValue = (cValue < 0.0f) ? 0.0f : ((cValue > 1.0f) ? 1.0f :
+          // cValue);
 
 #pragma ss stream_name "rodinia.srad_v2.c.st"
-        c[k] = cValue;
-        // uint64_t dk = i * cols * 4 + j * 4;
-        // delta[dk + 0] = dNValue;
-        // delta[dk + 1] = dSValue;
-        // delta[dk + 2] = dWValue;
-        // delta[dk + 3] = dEValue;
+          c[k] = cValue;
+          // uint64_t dk = i * cols * 4 + j * 4;
+          // delta[dk + 0] = dNValue;
+          // delta[dk + 1] = dSValue;
+          // delta[dk + 2] = dWValue;
+          // delta[dk + 3] = dEValue;
 
 #pragma ss stream_name "rodinia.srad_v2.deltaN.st"
-        deltaN[k] = dNValue;
+          deltaN[k] = dNValue;
 #pragma ss stream_name "rodinia.srad_v2.deltaS.st"
-        deltaS[k] = dSValue;
+          deltaS[k] = dSValue;
 #pragma ss stream_name "rodinia.srad_v2.deltaW.st"
-        deltaW[k] = dWValue;
+          deltaW[k] = dWValue;
 #pragma ss stream_name "rodinia.srad_v2.deltaE.st"
-        deltaE[k] = dEValue;
+          deltaE[k] = dEValue;
+        }
       }
     }
 
@@ -327,60 +357,91 @@ int main(int argc, char *argv[]) {
     m5_work_begin(1, 0);
 #endif
 
-/**
- * We use dynamic schedule to avoid floated streams concentrated in one bank.
- */
-#ifdef GEM_FORGE_DYN_SCHEDULE
-#pragma omp parallel for firstprivate(rows, cols, lambda)                      \
-    schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)
+    /**
+     * We use dynamic schedule to avoid floated streams concentrated in one
+     * bank.
+     */
+
+#pragma omp parallel firstprivate(rows, cols, lambda)
+    {
+
+#ifdef SKEW_ROW
+      // Rows are always interleaved by 1.
+      int64_t rows_per_round = nthreads;
+      int64_t row_rounds = (rows + rows_per_round - 1) / rows_per_round;
+      int64_t row_remainder = rows % rows_per_round;
+      if (row_remainder != 0) {
+        exit(1);
+      }
+
+      int tid = omp_get_thread_num();
+
+      // Skip the first row.
+      int64_t rr_start = tid == 0 ? 1 : 0;
+      // Skip the last row.
+      int64_t rr_end = (tid == nthreads - 1) ? row_rounds - 1 : row_rounds;
+
+#pragma clang loop unroll(disable) vectorize(disable)
+      for (int64_t rr = rr_start; rr < rr_end; ++rr) {
+
+        int64_t i = rr * rows_per_round + tid;
+
 #else
-#pragma omp parallel for firstprivate(rows, cols, lambda) schedule(static)
+
+#ifdef GEM_FORGE_DYN_SCHEDULE
+#pragma omp for schedule(dynamic, GEM_FORGE_DYN_SCHEDULE)
+#else
+#pragma omp for schedule(static)
 #endif
-    for (uint64_t i = 1; i < rows - 1; i++) {
+      for (uint64_t i = 1; i < rows - 1; i++) {
+
+#endif // SKEW_ROW
+
 #ifdef GEM_FORGE_FIX_INPUT
 #pragma omp simd
-      for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
-        uint64_t k = i * GEM_FORGE_FIX_COLS + j;
-        uint64_t kS = k + GEM_FORGE_FIX_COLS;
+        for (uint64_t j = 0; j < GEM_FORGE_FIX_COLS; j++) {
+          uint64_t k = i * GEM_FORGE_FIX_COLS + j;
+          uint64_t kS = k + GEM_FORGE_FIX_COLS;
 #else
-      for (uint64_t j = 0; j < cols; j++) {
-        uint64_t k = i * cols + j;
-        uint64_t kS = k + cols;
+        for (uint64_t j = 0; j < cols; j++) {
+          uint64_t k = i * cols + j;
+          uint64_t kS = k + cols;
 #endif
-        // ! Accessing j + 1.
-        // Out of bound.
-        // diffusion coefficent
+          // ! Accessing j + 1.
+          // Out of bound.
+          // diffusion coefficent
 
 #pragma ss stream_name "rodinia.srad_v2.cN.ld"
-        float cN = c[k];
+          float cN = c[k];
 #pragma ss stream_name "rodinia.srad_v2.cS.ld"
-        float cS = c[kS];
+          float cS = c[kS];
 #pragma ss stream_name "rodinia.srad_v2.cE.ld"
-        float cE = c[k + 1];
-        float cW = cN;
+          float cE = c[k + 1];
+          float cW = cN;
 
-        // divergence (equ 58)
+          // divergence (equ 58)
 #pragma ss stream_name "rodinia.srad_v2.deltaN.ld"
-        float dNValue = deltaN[k];
+          float dNValue = deltaN[k];
 #pragma ss stream_name "rodinia.srad_v2.deltaS.ld"
-        float dSValue = deltaS[k];
+          float dSValue = deltaS[k];
 #pragma ss stream_name "rodinia.srad_v2.deltaW.ld"
-        float dWValue = deltaW[k];
+          float dWValue = deltaW[k];
 #pragma ss stream_name "rodinia.srad_v2.deltaE.ld"
-        float dEValue = deltaE[k];
+          float dEValue = deltaE[k];
 
-        float D = cN * dNValue + cS * dSValue + cW * dWValue + cE * dEValue;
+          float D = cN * dNValue + cS * dSValue + cW * dWValue + cE * dEValue;
 
-        // image update (equ 61)
-        // J[k] = J[k] + 0.25f * lambda * D;
-        // ! GemForge
-        // Fix lambda to reduce the number of input for the computation.
+          // image update (equ 61)
+          // J[k] = J[k] + 0.25f * lambda * D;
+          // ! GemForge
+          // Fix lambda to reduce the number of input for the computation.
 
 #pragma ss stream_name "rodinia.srad_v2.Jc2.ld"
-        float Jc = J[k];
+          float Jc = J[k];
 
 #pragma ss stream_name "rodinia.srad_v2.J.st"
-        J[k] = Jc + 0.25f * D;
+          J[k] = Jc + 0.25f * D;
+        }
       }
     }
 #ifdef GEM_FORGE
